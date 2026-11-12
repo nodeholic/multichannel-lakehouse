@@ -45,6 +45,7 @@ def test_empty_uri_falls_back_to_the_default(tmp_path):
         ({"STORAGE": "local", "POSTGRES_SCHEMA": "g" * 41}, "POSTGRES_SCHEMA must match"),
         ({"STORAGE": "local", "POSTGRES_SCHEMA": "gold; drop"}, "POSTGRES_SCHEMA must match"),
         ({"STORAGE": "local", "POSTGRES_READER_ROLE": "bi reader"}, "POSTGRES_READER_ROLE must be"),
+        ({"STORAGE": "local", "POSTGRES_READER_ROLE": "public"}, "is not a dedicated role"),
     ],
 )
 def test_invalid_settings_fail_at_startup(env, message):

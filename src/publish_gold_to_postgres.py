@@ -14,7 +14,7 @@ The swap only replaces what this tool owns, and fails loudly instead of destroyi
     other object depends on Gold, the swap aborts, the transaction rolls back, and both the
     published Gold and the dependent objects stay as they were
   - an advisory lock serializes concurrent publishes, and the swap checks that the loading
-    schema holds exactly the expected tables
+    schema holds all expected tables
 Rerunning replaces the schema: the publish is idempotent.
 
   python src/publish_gold_to_postgres.py        # after `python src/run_dbt.py build`
@@ -68,17 +68,24 @@ def fingerprint(con: duckdb.DuckDBPyConnection, catalog_schema: str, table: str)
     return con.execute(f"SELECT count(*){sums} FROM {catalog_schema}.{table}").fetchone()
 
 
+def q(name: str) -> str:
+    """Quote an identifier for Postgres DDL, so names that are SQL keywords (user, order, ...)
+    still work. config.py already restricts names to [a-z0-9_], so no quote can appear inside."""
+    return f'"{name}"'
+
+
 def swap_statement(schema: str, loading: str) -> str:
     """The single DO block that replaces the published schema. Runs as one transaction."""
     tables = ", ".join(f"'{t}'" for t in GOLD_TABLES)
-    old_tables = ", ".join(f"{schema}.{t}" for t in GOLD_TABLES)
+    old_tables = ", ".join(f"{q(schema)}.{t}" for t in GOLD_TABLES)
     return f"""
 DO $$
 DECLARE
-    target_oid oid := (SELECT oid FROM pg_namespace WHERE nspname = '{schema}');
+    target_oid oid;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('publish_gold:{schema}'));  -- one swap at a time
     SET LOCAL lock_timeout = '10s';  -- a long BI query must not queue every reader behind the swap
+    target_oid := (SELECT oid FROM pg_namespace WHERE nspname = '{schema}');
 
     IF (SELECT count(*) FROM pg_tables WHERE schemaname = '{loading}' AND tablename IN ({tables}))
        <> {len(GOLD_TABLES)} THEN
@@ -93,54 +100,76 @@ BEGIN
         -- RESTRICT: if anything (a BI view, another table, ...) depends on Gold or lives in the
         -- schema, this raises and the whole transaction rolls back.
         DROP TABLE IF EXISTS {old_tables} RESTRICT;
-        DROP SCHEMA {schema} RESTRICT;
+        DROP SCHEMA {q(schema)} RESTRICT;
     END IF;
 
-    ALTER SCHEMA {loading} RENAME TO {schema};
+    ALTER SCHEMA {q(loading)} RENAME TO {q(schema)};
 END $$"""
 
 
-def publish(schema: str = config.POSTGRES_SCHEMA) -> dict[str, int]:
+def postgres_reason(error: Exception) -> str:
+    """DuckDB echoes the whole failing statement (the long DO block); keep Postgres' own reason."""
+    text = str(error)
+    return text[text.index("ERROR:"):].strip() if "ERROR:" in text else text
+
+
+def publish(schema: str = config.POSTGRES_SCHEMA) -> dict[str, int] | None:
+    """Publish Gold. Raises PublishError if nothing was published. Returns the row counts read
+    back after the swap, or None if the swap committed but the read-back failed."""
     if not WAREHOUSE.exists():
         raise SystemExit(f"{WAREHOUSE} not found: run `python src/run_dbt.py build` first")
     loading = f"{schema}__loading_{uuid.uuid4().hex[:8]}"  # per run: concurrent publishes never share it
+    reader = q(config.POSTGRES_READER_ROLE) if config.POSTGRES_READER_ROLE else None
 
     # In-memory DuckDB with two attached catalogs: the warehouse read-only (`wh`, so the publish
     # can never modify Gold) and Postgres writable (`pg`). Opening the warehouse itself read-only
     # would make the whole connection read-only, Postgres included.
     con = duckdb.connect()
     try:
-        con.execute("ATTACH ? AS wh (READ_ONLY)", [WAREHOUSE.as_posix()])
-        attach_postgres(con)
         try:
-            pg(con, f"CREATE SCHEMA {loading}")
+            con.execute("ATTACH ? AS wh (READ_ONLY)", [WAREHOUSE.as_posix()])
+            attach_postgres(con)
+        except duckdb.Error as error:
+            raise PublishError(postgres_reason(error)) from error
+
+        try:
+            pg(con, f"CREATE SCHEMA {q(loading)}")
             con.execute("CALL postgres_clear_cache()")  # DuckDB caches the Postgres catalog
             for table in GOLD_TABLES:
-                con.execute(f"CREATE TABLE pg.{loading}.{table} AS SELECT * FROM wh.gold.{table}")
+                con.execute(f'CREATE TABLE pg."{loading}".{table} AS SELECT * FROM wh.gold.{table}')
 
             mismatches = {
                 table: (expected, actual)
                 for table in GOLD_TABLES
-                if (expected := fingerprint(con, "wh.gold", table)) != (actual := fingerprint(con, f"pg.{loading}", table))
+                if (expected := fingerprint(con, "wh.gold", table)) != (actual := fingerprint(con, f'pg."{loading}"', table))
             }
             if mismatches:
                 raise PublishError(f"Gold in Postgres would differ from the warehouse: {mismatches}")
 
             for table, key in GOLD_TABLES.items():
-                pg(con, f"ALTER TABLE {loading}.{table} ADD PRIMARY KEY ({key})")
-            if config.POSTGRES_READER_ROLE:
-                pg(con, f"GRANT USAGE ON SCHEMA {loading} TO {config.POSTGRES_READER_ROLE}")
-                pg(con, f"GRANT SELECT ON ALL TABLES IN SCHEMA {loading} TO {config.POSTGRES_READER_ROLE}")
-            pg(con, f"COMMENT ON SCHEMA {loading} IS '{MARKER}'")
+                pg(con, f"ALTER TABLE {q(loading)}.{table} ADD PRIMARY KEY ({key})")
+            if reader:
+                pg(con, f"GRANT USAGE ON SCHEMA {q(loading)} TO {reader}")
+                pg(con, f"GRANT SELECT ON ALL TABLES IN SCHEMA {q(loading)} TO {reader}")
+            pg(con, f"COMMENT ON SCHEMA {q(loading)} IS '{MARKER}'")
 
             pg(con, swap_statement(schema, loading))
-        except Exception:
-            # Whatever failed, the published Gold is untouched; drop only this run's loading schema.
-            pg(con, f"DROP SCHEMA IF EXISTS {loading} CASCADE")
+        except BaseException as error:  # also Ctrl-C: never leave this run's loading schema behind
+            try:
+                pg(con, f"DROP SCHEMA IF EXISTS {q(loading)} CASCADE")
+            except duckdb.Error as cleanup_error:  # must not hide the original error
+                print(f"warning: could not drop {loading}: {postgres_reason(cleanup_error)}", file=sys.stderr)
+            if isinstance(error, duckdb.Error):
+                raise PublishError(postgres_reason(error)) from error
             raise
 
-        con.execute("CALL postgres_clear_cache()")
-        return {table: fingerprint(con, f"pg.{schema}", table)[0] for table in GOLD_TABLES}
+        # The swap has committed: from here on, a failure no longer means "nothing published".
+        try:
+            con.execute("CALL postgres_clear_cache()")
+            return {table: fingerprint(con, f'pg."{schema}"', table)[0] for table in GOLD_TABLES}
+        except duckdb.Error as error:
+            print(f"warning: Gold was published, but reading it back failed: {postgres_reason(error)}", file=sys.stderr)
+            return None
     finally:
         con.close()
 
@@ -148,12 +177,12 @@ def publish(schema: str = config.POSTGRES_SCHEMA) -> dict[str, int]:
 def main() -> int:
     try:
         counts = publish()
-    except (PublishError, duckdb.Error) as error:
+    except PublishError as error:
         print(f"Publish failed, the published Gold is unchanged: {error}", file=sys.stderr)
         return 1
     target = f"{config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DB}"
     print(f"Published Gold to Postgres {target}, schema {config.POSTGRES_SCHEMA}")
-    for table, rows in counts.items():
+    for table, rows in (counts or {}).items():
         print(f"  {table:<18}: {rows:>6} rows")
     return 0
 

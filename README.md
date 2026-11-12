@@ -116,11 +116,13 @@ python src/run_dbt.py build                    # Gold in the DuckDB warehouse
 python src/publish_gold_to_postgres.py         # Gold in Postgres, schema `gold`
 ```
 
-Query it from the host with any SQL client (DBeaver, pgAdmin, psql) on `127.0.0.1:$POSTGRES_PORT`, database
-`warehouse`, credentials from `.env`. For example, revenue per channel:
+Query it from the host with any SQL client (DBeaver, pgAdmin, psql) on `127.0.0.1`, **the port from
+`POSTGRES_PORT` in `.env`** (another Postgres on the machine may already own 5432), database `warehouse`,
+credentials from `.env`. For example, revenue per channel:
 
 ```bash
-psql -h 127.0.0.1 -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d warehouse -c "
+set -a; . ./.env; set +a          # export the POSTGRES_* values from .env into this shell
+PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
   SELECT ch.channel_name, count(DISTINCT f.order_id) AS orders, sum(f.net_amount) AS revenue
   FROM gold.fact_order_items f JOIN gold.dim_channel ch USING (channel_key)
   WHERE f.order_status = 'COMPLETED'
@@ -150,6 +152,11 @@ The swap replaces only what the tool owns, and otherwise fails loudly without ch
   complete.
 - **Locks.** `lock_timeout` is 10 s, so a long-running query on Gold makes the publish fail rather than queue every
   reader behind it. Rerun it later.
+- **Grants.** Every publish creates new tables, so grants made by hand on Gold are gone after the next publish.
+  Grant to `POSTGRES_READER_ROLE` (re-applied on every publish) and make users members of that role.
+- **Hard crashes.** Errors and Ctrl-C drop the run's loading schema. A killed process or a machine crash can leave
+  a `gold__loading_<id>` schema behind; Gold itself is unaffected. List leftovers with
+  `SELECT nspname FROM pg_namespace WHERE nspname LIKE 'gold\_\_loading\_%';` and drop them when no publish is running.
 
 | Variable | Default | Purpose |
 |---|---|---|

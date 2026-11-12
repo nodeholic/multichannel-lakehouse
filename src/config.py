@@ -110,6 +110,9 @@ if POSTGRES_SCHEMA in ("public", "information_schema") or POSTGRES_SCHEMA.starts
 POSTGRES_READER_ROLE = env("POSTGRES_READER_ROLE", "")
 if POSTGRES_READER_ROLE and not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", POSTGRES_READER_ROLE):
     raise ConfigError(f"POSTGRES_READER_ROLE must be a plain lower-case role name, got {POSTGRES_READER_ROLE!r}")
+if POSTGRES_READER_ROLE in ("public", "current_user", "current_role", "session_user"):
+    # GRANT ... TO public would make Gold readable by every role in the database.
+    raise ConfigError(f"POSTGRES_READER_ROLE={POSTGRES_READER_ROLE} is not a dedicated role; create one for BI")
 
 # The salt is mixed into values before hashing. Without it, hashed phone numbers are
 # trivial to reverse: there are only ~10^9 possible numbers, brute-forced in minutes.

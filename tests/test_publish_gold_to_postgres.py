@@ -54,7 +54,8 @@ def execute(sql: str) -> None:
 def stack(tmp_path_factory):
     """Build Gold once, publish it, and guarantee cleanup even if setup fails half-way."""
     data_dir = tmp_path_factory.mktemp("gold")
-    env = {"STORAGE": "local", "DATA_DIR": str(data_dir), "POSTGRES_SCHEMA": SCHEMA}
+    # POSTGRES_READER_ROLE is pinned empty so a role set in the developer's .env cannot leak in.
+    env = {"STORAGE": "local", "DATA_DIR": str(data_dir), "POSTGRES_SCHEMA": SCHEMA, "POSTGRES_READER_ROLE": ""}
     execute(f"CREATE ROLE {READER_ROLE} NOLOGIN")
     try:
         run_script("data_generator.py", env, "--days", "2", "--orders-per-day", "50")
@@ -154,3 +155,25 @@ def test_refuses_to_replace_a_schema_it_does_not_manage(stack):
         assert loading_schemas(foreign) == 0
     finally:
         execute(f"DROP SCHEMA {foreign} CASCADE")
+
+
+def test_foreign_object_inside_gold_blocks_the_swap_and_survives(stack):
+    execute(f"CREATE TABLE {SCHEMA}.analyst_notes (note text)")
+    try:
+        stderr = run_script_expecting_failure("publish_gold_to_postgres.py", stack["env"])
+        assert "depend" in stderr  # DROP SCHEMA ... RESTRICT refuses a schema that is not empty
+        assert scalar("SELECT count(*) FROM pg.information_schema.tables WHERE table_schema = ?", [SCHEMA]) == 6
+        assert_same_rows(stack["warehouse"], SCHEMA)
+        assert loading_schemas(SCHEMA) == 0
+    finally:
+        execute(f"DROP TABLE {SCHEMA}.analyst_notes")
+
+
+def test_missing_reader_role_fails_before_the_swap(stack):
+    stderr = run_script_expecting_failure(
+        "publish_gold_to_postgres.py", {**stack["env"], "POSTGRES_READER_ROLE": f"pytest_missing_{RUN_ID}"}
+    )
+    assert "does not exist" in stderr
+    assert "DO $$" not in stderr  # the error shows Postgres' reason, not the echoed statement
+    assert_same_rows(stack["warehouse"], SCHEMA)
+    assert loading_schemas(SCHEMA) == 0
