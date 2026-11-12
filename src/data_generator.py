@@ -8,6 +8,7 @@ Dirty data is injected on purpose so the Silver layer has real work to do:
   - duplicated events (webhook retries)
   - events missing order_id
   - unnormalized emails (upper case, stray whitespace)
+  - malformed timestamps, unknown statuses, empty item lists, invalid item quantities
 
 Run:  python src/data_generator.py --start-date 2026-11-01 --days 7 --orders-per-day 200
 """
@@ -48,6 +49,33 @@ PRODUCTS = [
 
 # Probability of each terminal status (a tiny state machine).
 FINAL_STATUS_WEIGHTS = {"COMPLETED": 0.80, "CANCELLED": 0.12, "REFUNDED": 0.08}
+
+# Per-event probability of each kind of malformed payload a real source sends occasionally.
+CORRUPTION_RATES = {
+    "invalid_timestamp": 0.004,
+    "unknown_status": 0.005,
+    "empty_items": 0.003,
+    "invalid_item": 0.004,
+}
+
+
+def corrupt_event(event: dict) -> dict:
+    """Return a copy of the event with at most one kind of corruption applied."""
+    event = dict(event)
+    roll = random.random()
+    for kind, rate in CORRUPTION_RATES.items():
+        if roll < rate:
+            if kind == "invalid_timestamp":
+                event["created_at"] = "2026-13-45T99:99:99"  # month 13, hour 99
+            elif kind == "unknown_status":
+                event["order_status"] = "SHIPPED"  # a status the pipeline does not know yet
+            elif kind == "empty_items":
+                event["items"] = []
+            elif kind == "invalid_item":
+                event["items"] = [dict(event["items"][0], quantity=-1)] + event["items"][1:]
+            return event
+        roll -= rate
+    return event
 
 
 def build_customer_pool(fake: Faker, size: int, start: date, days: int) -> list[dict]:
@@ -157,6 +185,7 @@ def generate_events(pool: list[dict], start: date, days: int, orders_per_day: in
                 }
                 if random.random() < 0.01:  # dirty data: missing order_id
                     event["order_id"] = None
+                event = corrupt_event(event)
                 events.append(event)
                 if random.random() < 0.03:  # dirty data: webhook delivered twice
                     events.append(dict(event, event_id=str(uuid.uuid4())))
