@@ -79,7 +79,29 @@ docker compose ps -a        # rustfs and postgres: healthy, create-buckets: exit
 - `docker compose down` stops the stack and keeps the data; `docker compose down -v` also deletes the volumes.
 
 RustFS replaces MinIO, the object store in the original design: MinIO images are no longer published on Docker Hub.
-The pipeline does not use the stack yet; wiring Bronze, Silver and Gold to it follows in the next PRs.
+
+### Running Bronze and Silver on S3
+
+`STORAGE` switches every job between local disk (default) and the RustFS buckets. Connection settings and
+credentials are read from the same `.env` that docker compose uses.
+
+```bash
+docker compose up -d
+STORAGE=s3 .venv/Scripts/python src/data_generator.py     # -> s3://lakehouse-bronze/orders/year=/month=/day=/
+STORAGE=s3 .venv/Scripts/python src/bronze_to_silver.py   # -> s3://lakehouse-silver/<table>/
+STORAGE=s3 .venv/Scripts/python src/query.py "SELECT count(*) FROM silver_orders"
+```
+
+On PowerShell, set the variable first: `$env:STORAGE = "s3"`. Both backends produce identical Silver for the same
+seed. Reruns stay idempotent on S3 too: each Silver table prefix is deleted before it is rewritten.
+dbt still reads the local Silver until Gold moves to Postgres (next PR).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `STORAGE` | `local` | `local` or `s3` |
+| `S3_ENDPOINT` | `http://localhost:${S3_PORT}` | S3 API endpoint |
+| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | from `.env` | credentials |
+| `BRONZE_URI`, `SILVER_URI` | `s3://lakehouse-bronze`, `s3://lakehouse-silver` | override the layer roots (tests use an isolated prefix) |
 
 ## Answering business questions
 
@@ -127,7 +149,8 @@ Sample results (seed 42, 7 days × 200 orders):
 
 | File | Purpose |
 |---|---|
-| `src/config.py` | Layer paths and the PII hashing salt (`PII_SALT` env var) |
+| `src/config.py` | Storage backend (`STORAGE`), layer URIs, S3 settings, PII hashing salt (`PII_SALT` env var) |
+| `src/storage.py` | File and DuckDB helpers that work the same on local disk and on S3 |
 | `src/data_generator.py` | Simulates multi-channel order events, with injected dirty data (duplicates, missing `order_id`, messy emails, malformed timestamps, unknown statuses, broken items) |
 | `src/bronze_to_silver.py` | Validates and cleans data with DuckDB SQL, writes Parquet partitioned by `order_date`, idempotent |
 | `src/query.py` | Runs ad-hoc SQL against the `bronze_events` and `silver_*` views and the `gold.*` tables |
@@ -163,8 +186,12 @@ row can never crash the job, and inferred types never drift with the data.
 
 ```bash
 .venv/Scripts/pip install -r requirements-dev.txt
-.venv/Scripts/python -m pytest -v
+.venv/Scripts/python -m pytest -v                                   # offline, S3 tests skipped
+RUN_S3_TESTS=1 .venv/Scripts/python -m pytest tests/test_s3_storage_pipeline.py -v   # needs docker compose up -d
 ```
+
+The S3 integration tests write under a unique `pytest-<id>` prefix, compare S3 Silver with local Silver for the
+same seed, check that reruns replace files instead of adding them, and delete their prefix afterwards.
 
 The tests run the whole pipeline in a temporary directory (`DATA_DIR`) and assert Silver invariants:
 every order appears exactly once, no order disappears without a trace, broken events are quarantined with a known reason,

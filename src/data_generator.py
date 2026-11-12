@@ -20,7 +20,8 @@ from datetime import date, datetime, timedelta
 
 from faker import Faker
 
-from config import BRONZE_ORDERS_DIR
+from config import BRONZE_ORDERS_URI
+from storage import write_text
 
 CHANNELS = ["SHOPIFY", "SHOPEE", "TIKTOK_SHOP", "LAZADA"]
 TIERS = ["Standard", "Silver", "Gold", "Platinum"]
@@ -202,13 +203,11 @@ def write_bronze(events: list[dict]) -> dict[str, int]:
 
     stats = {}
     for day, day_events in sorted(by_day.items()):
-        folder = BRONZE_ORDERS_DIR / f"year={day:%Y}" / f"month={day:%m}" / f"day={day:%d}"
-        folder.mkdir(parents=True, exist_ok=True)
-        # Each run writes a new file (never overwrites) -> simulates data arriving over time
-        path = folder / f"events-{uuid.uuid4().hex[:8]}.jsonl"
-        with path.open("w", encoding="utf-8") as f:
-            for e in day_events:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        folder = f"{BRONZE_ORDERS_URI}/year={day:%Y}/month={day:%m}/day={day:%d}"
+        # Each run writes a new file (never overwrites) -> simulates data arriving over time.
+        # Works the same on local disk and on S3 (see storage.write_text).
+        uri = f"{folder}/events-{uuid.uuid4().hex[:8]}.jsonl"
+        write_text(uri, "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in day_events))
         stats[str(day)] = len(day_events)
     return stats
 
@@ -230,7 +229,7 @@ def main() -> None:
     events = generate_events(pool, args.start_date, args.days, args.orders_per_day)
     stats = write_bronze(events)
 
-    print(f"Wrote {len(events)} events to {BRONZE_ORDERS_DIR}")
+    print(f"Wrote {len(events)} events to {BRONZE_ORDERS_URI}")
     for day, n in stats.items():
         print(f"  {day}: {n} events")
 
