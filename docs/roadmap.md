@@ -7,7 +7,7 @@ flow end-to-end before the next tool is introduced.
 |---|---|---|---|
 | 1 | Generator → Bronze → Silver (local) | Python, Faker, DuckDB | ✅ Done |
 | 2 | Gold star schema, SCD2 `dim_customer`, data tests | dbt-duckdb | ✅ Done |
-| 3 | Move storage to S3 (RustFS), serve from Postgres | Docker Compose | 🚧 In progress |
+| 3 | Move storage to S3 (RustFS), serve from Postgres | Docker Compose | ✅ Done |
 | 4 | Orchestration + data quality gate | Airflow, Soda Core | ⏳ Todo |
 | 5 | Streaming ingestion | Redpanda (+ optional Spark) | ⏳ Todo |
 | 6 | Dashboard, architecture diagram, trade-offs | Superset | ⏳ Todo |
