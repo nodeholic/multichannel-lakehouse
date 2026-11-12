@@ -23,6 +23,11 @@ flow end-to-end before the next tool is introduced.
   rebuilt on every run; a `row_number()` counter would renumber rows whenever a new key sorts in between,
   silently re-pointing facts. A hash is identical on every run and portable to Postgres.
   Exception: `dim_date.date_key` is the conventional integer `YYYYMMDD`.
+- **`dim_customer` (SCD Type 2) is rebuilt from order history**, not with `dbt snapshot`. A snapshot only
+  sees changes between two runs, dates them by when the job ran, and cannot be rebuilt once lost; Silver
+  `order_events` already holds every observation with its exact timestamp. Versions are ordered by the
+  order's `created_at` (when the customer snapshot was taken), never by `updated_at`. `dbt snapshot` remains
+  the right tool for a source that only exposes its current state.
 - **Reference data nobody sends** (channel names, platform types) lives in dbt seeds, versioned in git.
 - **PII** is normalized, then hashed as `sha256(salt || value)`; customer names are dropped.
 - **Every job is idempotent**: reruns never duplicate data.
