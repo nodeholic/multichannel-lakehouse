@@ -92,16 +92,26 @@ STORAGE=s3 .venv/Scripts/python src/bronze_to_silver.py   # -> s3://lakehouse-si
 STORAGE=s3 .venv/Scripts/python src/query.py "SELECT count(*) FROM silver_orders"
 ```
 
-On PowerShell, set the variable first: `$env:STORAGE = "s3"`. Both backends produce identical Silver for the same
-seed. Reruns stay idempotent on S3 too: each Silver table prefix is deleted before it is rewritten.
-dbt still reads the local Silver until Gold moves to Postgres (next PR).
+On PowerShell, set the variable first: `$env:STORAGE = "s3"`. It stays set for the whole session; tests are not
+affected, because `tests/conftest.py` pins every test run to local storage.
+
+- Both backends produce the same Silver row counts and money totals for the same seed (checked by the integration tests).
+- Reruns stay idempotent on S3 too: each Silver table prefix is deleted before it is rewritten, so partitions that
+  disappeared from Bronze are removed as well.
+- Delete-then-write is not atomic: if a run fails halfway, that Silver table is incomplete until the next successful
+  run. Bronze is untouched, so a rerun always recovers.
+- The first S3 run downloads DuckDB's `httpfs` extension (network access needed once; it is cached afterwards).
+- dbt still reads the local Silver until Gold moves to Postgres (next PR).
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `STORAGE` | `local` | `local` or `s3` |
-| `S3_ENDPOINT` | `http://localhost:${S3_PORT}` | S3 API endpoint |
-| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | from `.env` | credentials |
-| `BRONZE_URI`, `SILVER_URI` | `s3://lakehouse-bronze`, `s3://lakehouse-silver` | override the layer roots (tests use an isolated prefix) |
+| `S3_ENDPOINT` | `http://localhost:${S3_PORT}` | S3 API endpoint, must start with `http://` or `https://` |
+| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | from `.env` | credentials, required when `STORAGE=s3` |
+| `BRONZE_URI`, `SILVER_URI` | `data/bronze`, `data/silver` (local); `s3://lakehouse-bronze`, `s3://lakehouse-silver` (s3) | override the layer roots; must match `STORAGE` |
+
+Invalid settings (empty URI, `s3://` without a bucket, an endpoint without scheme, missing credentials, an `s3://`
+URI while `STORAGE=local`) stop the job at startup with a message naming the variable.
 
 ## Answering business questions
 
