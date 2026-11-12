@@ -1,0 +1,16 @@
+# Silver Parquet files exposed to dbt as sources. dbt-duckdb reads them in place:
+# {name} is replaced by each table name below.
+version: 2
+
+sources:
+  - name: silver
+    description: Clean, validated data produced by src/bronze_to_silver.py.
+    meta:
+      external_location: "read_parquet('{{ env_var('DATA_DIR', 'data') }}/silver/{name}/**/*.parquet', hive_partitioning = true)"
+    tables:
+      - name: orders
+        description: One row per order, latest known state.
+      - name: order_items
+        description: One row per product within an order.
+      - name: order_events
+        description: Every distinct status change of every order (history).

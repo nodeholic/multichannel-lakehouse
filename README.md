@@ -6,7 +6,7 @@ architecture (Bronze → Silver → Gold). 100% open-source, runs locally.
 
 The project is built incrementally, one phase at a time. See [docs/roadmap.md](docs/roadmap.md).
 
-## Current state: Phase 1, Generator → Bronze → Silver (local, DuckDB)
+## Current state: Phase 2 in progress, Silver → Gold with dbt
 
 ```
 data_generator.py ──► data/bronze/orders/year=/month=/day=/*.jsonl   (raw JSON, append-only)
@@ -16,6 +16,11 @@ bronze_to_silver.py (DuckDB)  ▼
                       data/silver/orders/          one row per order (latest state)
                       data/silver/order_items/     one row per product in an order
                       data/silver/rejected_events/ quarantined bad records
+                              │
+dbt build                     ▼
+                      data/warehouse.duckdb
+                        staging.stg_*              thin views over Silver
+                        gold.*                     star schema (coming next)
 ```
 
 ## Run it
@@ -26,7 +31,11 @@ python -m venv .venv
 .venv/Scripts/python src/data_generator.py --start-date 2026-11-01 --days 7 --orders-per-day 200
 .venv/Scripts/python src/bronze_to_silver.py
 .venv/Scripts/python src/query.py "SELECT channel, sum(net_amount) FROM silver_orders WHERE order_status='COMPLETED' GROUP BY 1"
+.venv/Scripts/dbt build --project-dir dbt --profiles-dir dbt      # models + data tests
 ```
+
+`dbt build` runs every model and its data tests in dependency order. To browse the lineage graph:
+`dbt docs generate --project-dir dbt --profiles-dir dbt && dbt docs serve --project-dir dbt --profiles-dir dbt`.
 
 ## Files
 
@@ -36,6 +45,7 @@ python -m venv .venv
 | `src/data_generator.py` | Simulates multi-channel order events, with injected dirty data (duplicates, missing `order_id`, messy emails, malformed timestamps, unknown statuses, broken items) |
 | `src/bronze_to_silver.py` | Validates and cleans data with DuckDB SQL, writes Parquet partitioned by `order_date`, idempotent |
 | `src/query.py` | Runs ad-hoc SQL against the `bronze_events` and `silver_*` views |
+| `dbt/` | dbt project for the Gold layer: Silver sources, staging views, data tests |
 
 ## Design decisions
 

@@ -1,4 +1,4 @@
-# Runs the Generator -> Bronze -> Silver pipeline tests on every PR and on pushes to dev/main.
+# Runs the pipeline tests and builds the dbt project on every PR and on pushes to dev/main.
 name: pipeline-tests
 
 on:
@@ -17,4 +17,11 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
-      - run: pytest -v
+      - name: Python pipeline tests (Bronze -> Silver)
+        run: pytest -v
+      - name: Generate Bronze and build Silver
+        run: |
+          python src/data_generator.py --days 3 --orders-per-day 100
+          python src/bronze_to_silver.py
+      - name: dbt build (models + data tests)
+        run: dbt build --project-dir dbt --profiles-dir dbt
