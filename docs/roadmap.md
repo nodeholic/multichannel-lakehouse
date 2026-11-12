@@ -6,7 +6,7 @@ flow end-to-end before the next tool is introduced.
 | # | Phase | Tools | Status |
 |---|---|---|---|
 | 1 | Generator → Bronze → Silver (local) | Python, Faker, DuckDB | ✅ Done |
-| 2 | Gold star schema, SCD2 `dim_customer`, data tests | dbt-duckdb | ⏳ Todo |
+| 2 | Gold star schema, SCD2 `dim_customer`, data tests | dbt-duckdb | 🚧 In progress |
 | 3 | Move storage to MinIO, serve from Postgres | Docker Compose | ⏳ Todo |
 | 4 | Orchestration + data quality gate | Airflow, Soda Core | ⏳ Todo |
 | 5 | Streaming ingestion | Redpanda (+ optional Spark) | ⏳ Todo |

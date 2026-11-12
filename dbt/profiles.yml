@@ -1,0 +1,9 @@
+# Connection profile. The warehouse is a single DuckDB file next to the Silver data.
+# DATA_DIR defaults to ./data (relative to where dbt is run, i.e. the repository root).
+lakehouse:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DATA_DIR', 'data') }}/warehouse.duckdb"
+      threads: 4

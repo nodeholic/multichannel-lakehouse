@@ -1,0 +1,48 @@
+version: 2
+
+models:
+  - name: stg_orders
+    description: One row per order, latest known state.
+    columns:
+      - name: order_id
+        data_tests: [not_null, unique]
+      - name: customer_id
+        data_tests: [not_null]
+      - name: order_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [PENDING, PROCESSING, COMPLETED, CANCELLED, REFUNDED]
+      - name: channel
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [SHOPIFY, SHOPEE, TIKTOK_SHOP, LAZADA]
+
+  - name: stg_order_items
+    description: One row per product within an order.
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_orders')
+                field: order_id
+      - name: product_id
+        data_tests: [not_null]
+      - name: quantity
+        data_tests: [not_null]
+
+  - name: stg_order_events
+    description: Every distinct status change of every order.
+    columns:
+      - name: event_id
+        data_tests: [not_null, unique]
+      - name: customer_id
+        data_tests: [not_null]
+      - name: membership_tier
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [Standard, Silver, Gold, Platinum]

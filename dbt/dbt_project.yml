@@ -1,0 +1,19 @@
+# dbt project that builds the Gold layer from Silver Parquet files.
+# Run from the repository root:
+#   dbt build --project-dir dbt --profiles-dir dbt
+name: lakehouse
+version: "1.0.0"
+profile: lakehouse
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  lakehouse:
+    # Staging: thin views over Silver, one per source table. Only place that knows file layout.
+    staging:
+      +materialized: view
+      +schema: staging
