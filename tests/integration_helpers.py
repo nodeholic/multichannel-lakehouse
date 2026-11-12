@@ -19,13 +19,25 @@ requires_stack = pytest.mark.skipif(
 )
 
 
-def run_script(script: str, env: dict, *args: str) -> None:
-    """Run a pipeline script in a subprocess with extra env vars; show its stderr on failure."""
-    result = subprocess.run(
+def _run(script: str, env: dict, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
         [sys.executable, str(SRC / script), *args],
         env={**os.environ, "PYTHONIOENCODING": "utf-8", **env},
         capture_output=True,
         text=True,
     )
+
+
+def run_script(script: str, env: dict, *args: str) -> None:
+    """Run a pipeline script in a subprocess with extra env vars; show its stderr on failure."""
+    result = _run(script, env, *args)
     if result.returncode != 0:
         raise AssertionError(f"{script} exited {result.returncode}:\n{(result.stderr or result.stdout)[-2000:]}")
+
+
+def run_script_expecting_failure(script: str, env: dict, *args: str) -> str:
+    """Run a script that must fail; return its stderr so the test can check the reason."""
+    result = _run(script, env, *args)
+    if result.returncode == 0:
+        raise AssertionError(f"{script} was expected to fail but exited 0:\n{result.stdout[-2000:]}")
+    return result.stderr

@@ -12,6 +12,7 @@ Invalid settings fail here, at startup, with a message naming the variable, inst
 surfacing later as a confusing S3 or file-system error.
 """
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -98,9 +99,17 @@ POSTGRES_DB = env("POSTGRES_DB", "warehouse")
 POSTGRES_USER = env("POSTGRES_USER", "")
 POSTGRES_PASSWORD = env("POSTGRES_PASSWORD", "")
 POSTGRES_SCHEMA = env("POSTGRES_SCHEMA", "gold")
-if not POSTGRES_SCHEMA.isidentifier() or POSTGRES_SCHEMA != POSTGRES_SCHEMA.lower():
-    # The schema name is interpolated into DDL, so only plain lower-case identifiers are allowed.
-    raise ConfigError(f"POSTGRES_SCHEMA must be a lower-case identifier, got {POSTGRES_SCHEMA!r}")
+# The name is interpolated into DDL and gets a "__loading_<8 hex>" suffix during a publish.
+# Postgres silently truncates identifiers to 63 bytes, so the base name stays <= 40 characters:
+# otherwise the loading name could be truncated into the live schema name.
+if not re.fullmatch(r"[a-z_][a-z0-9_]{0,39}", POSTGRES_SCHEMA):
+    raise ConfigError(f"POSTGRES_SCHEMA must match [a-z_][a-z0-9_]{{0,39}}, got {POSTGRES_SCHEMA!r}")
+if POSTGRES_SCHEMA in ("public", "information_schema") or POSTGRES_SCHEMA.startswith("pg_"):
+    raise ConfigError(f"POSTGRES_SCHEMA={POSTGRES_SCHEMA} is a system schema; the publish replaces its target")
+# Optional role that gets read access to the published Gold (USAGE on the schema, SELECT on tables).
+POSTGRES_READER_ROLE = env("POSTGRES_READER_ROLE", "")
+if POSTGRES_READER_ROLE and not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", POSTGRES_READER_ROLE):
+    raise ConfigError(f"POSTGRES_READER_ROLE must be a plain lower-case role name, got {POSTGRES_READER_ROLE!r}")
 
 # The salt is mixed into values before hashing. Without it, hashed phone numbers are
 # trivial to reverse: there are only ~10^9 possible numbers, brute-forced in minutes.

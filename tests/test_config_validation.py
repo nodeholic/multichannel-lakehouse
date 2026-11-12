@@ -15,7 +15,8 @@ VALID_S3 = {"STORAGE": "s3", "S3_ACCESS_KEY": "key", "S3_SECRET_KEY": "secret", 
 
 
 def import_config(env: dict) -> subprocess.CompletedProcess:
-    base = {k: v for k, v in os.environ.items() if not k.startswith(("S3_", "BRONZE_", "SILVER_", "STORAGE"))}
+    prefixes = ("S3_", "BRONZE_", "SILVER_", "STORAGE", "POSTGRES_SCHEMA", "POSTGRES_READER_ROLE")
+    base = {k: v for k, v in os.environ.items() if not k.startswith(prefixes)}
     return subprocess.run(
         [sys.executable, "-c", "import config; print(config.BRONZE_URI); print(config.SILVER_URI)"],
         cwd=SRC, env={**base, **env}, capture_output=True, text=True,
@@ -38,6 +39,12 @@ def test_empty_uri_falls_back_to_the_default(tmp_path):
         ({**VALID_S3, "S3_ENDPOINT": "localhost:9000"}, "S3_ENDPOINT must look like"),
         ({**VALID_S3, "S3_SECRET_KEY": ""}, "needs S3_ACCESS_KEY and S3_SECRET_KEY"),
         ({"STORAGE": "minio"}, "STORAGE must be 'local' or 's3'"),
+        ({"STORAGE": "local", "POSTGRES_SCHEMA": "public"}, "is a system schema"),
+        ({"STORAGE": "local", "POSTGRES_SCHEMA": "pg_temp"}, "is a system schema"),
+        ({"STORAGE": "local", "POSTGRES_SCHEMA": "Gold"}, "POSTGRES_SCHEMA must match"),
+        ({"STORAGE": "local", "POSTGRES_SCHEMA": "g" * 41}, "POSTGRES_SCHEMA must match"),
+        ({"STORAGE": "local", "POSTGRES_SCHEMA": "gold; drop"}, "POSTGRES_SCHEMA must match"),
+        ({"STORAGE": "local", "POSTGRES_READER_ROLE": "bi reader"}, "POSTGRES_READER_ROLE must be"),
     ],
 )
 def test_invalid_settings_fail_at_startup(env, message):

@@ -33,8 +33,13 @@ def dbt_environment() -> dict[str, str]:
 
 
 def main() -> int:
+    if len(sys.argv) < 2:
+        print(__doc__)
+        return 2
     os.environ.update(dbt_environment())
-    args = [*sys.argv[1:], "--project-dir", str(DBT_DIR), "--profiles-dir", str(DBT_DIR), "--target", config.STORAGE]
+    args = [*sys.argv[1:], "--project-dir", str(DBT_DIR), "--profiles-dir", str(DBT_DIR)]
+    if "--target" not in args and "-t" not in args:  # an explicit target from the user wins
+        args += ["--target", config.STORAGE]
     return 0 if dbtRunner().invoke(args).success else 1
 
 

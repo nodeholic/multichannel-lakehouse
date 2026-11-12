@@ -114,14 +114,42 @@ affected, because `tests/conftest.py` pins every test run to local storage.
 ```bash
 python src/run_dbt.py build                    # Gold in the DuckDB warehouse
 python src/publish_gold_to_postgres.py         # Gold in Postgres, schema `gold`
-docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select count(*) from gold.fact_order_items"'
 ```
 
-The publish is atomic and idempotent: the five Gold tables are loaded into `gold__loading`, checked against the
-warehouse (row counts and money totals; nothing is swapped if they differ), given primary keys, and then swapped
-in with one Postgres statement (`DROP SCHEMA gold` + `ALTER SCHEMA gold__loading RENAME TO gold`). Postgres DDL is
-transactional, so a BI tool reads either the previous Gold or the new one, never a half-loaded mix.
-`POSTGRES_SCHEMA` changes the target schema (tests publish into `pytest_<id>` and drop it).
+Query it from the host with any SQL client (DBeaver, pgAdmin, psql) on `127.0.0.1:$POSTGRES_PORT`, database
+`warehouse`, credentials from `.env`. For example, revenue per channel:
+
+```bash
+psql -h 127.0.0.1 -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d warehouse -c "
+  SELECT ch.channel_name, count(DISTINCT f.order_id) AS orders, sum(f.net_amount) AS revenue
+  FROM gold.fact_order_items f JOIN gold.dim_channel ch USING (channel_key)
+  WHERE f.order_status = 'COMPLETED'
+  GROUP BY 1 ORDER BY revenue DESC"
+```
+
+Without a local psql: `docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`.
+
+**How the publish stays safe.**
+
+1. The five Gold tables are loaded into a per-run schema `gold__loading_<id>`.
+2. They are checked against the warehouse (row counts plus gross, discount and net totals). Nothing is swapped if
+   they differ.
+3. They get primary keys, `SELECT` for `POSTGRES_READER_ROLE` (optional), and a "managed by
+   publish_gold_to_postgres" marker.
+4. One Postgres statement swaps them in. Postgres DDL is transactional, so a BI tool reads either the previous Gold
+   or the new one, never a half-loaded mix.
+
+The swap replaces only what the tool owns, and otherwise fails loudly without changing anything:
+
+- **Unmarked schema.** It refuses to replace a schema without the marker, so `POSTGRES_SCHEMA` can never wipe an
+  application schema. System schemas such as `public` are rejected at startup.
+- **No `CASCADE`.** The old Gold tables and schema are dropped with `RESTRICT`, never `CASCADE`. If a BI view
+  depends on Gold, the publish stops and the view survives. Recreate such views after the publish, or build them in
+  dbt instead.
+- **Concurrent publishes.** An advisory lock serializes them, and the swap checks that the loading schema is
+  complete.
+- **Locks.** `lock_timeout` is 10 s, so a long-running query on Gold makes the publish fail rather than queue every
+  reader behind it. Rerun it later.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -129,9 +157,14 @@ transactional, so a BI tool reads either the previous Gold or the new one, never
 | `S3_ENDPOINT` | `http://localhost:${S3_PORT}` | S3 API endpoint, must start with `http://` or `https://` |
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | from `.env` | credentials, required when `STORAGE=s3` |
 | `BRONZE_URI`, `SILVER_URI` | `data/bronze`, `data/silver` (local); `s3://lakehouse-bronze`, `s3://lakehouse-silver` (s3) | override the layer roots; must match `STORAGE` |
+| `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB` | `127.0.0.1`, `5432`, `warehouse` | serving database |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD` | from `.env` | credentials, required to publish |
+| `POSTGRES_SCHEMA` | `gold` | target schema: `[a-z_][a-z0-9_]{0,39}`, not a system schema |
+| `POSTGRES_READER_ROLE` | none | role that gets read access to the published Gold |
 
 Invalid settings (empty URI, `s3://` without a bucket, an endpoint without scheme, missing credentials, an `s3://`
-URI while `STORAGE=local`) stop the job at startup with a message naming the variable.
+URI while `STORAGE=local`, a system or over-long schema name) stop the job at startup with a message naming the
+variable.
 
 ## Answering business questions
 
@@ -250,8 +283,9 @@ RUN_INTEGRATION_TESTS=1 .venv/Scripts/python -m pytest -v          # also S3 + P
 The integration tests never touch real data. S3 tests write under a unique `pytest-<id>` prefix, compare S3
 Silver and the Gold built from it with the local run for the same seed, check that reruns replace files instead
 of adding them, and delete their prefix afterwards. Postgres tests publish into a `pytest_<id>` schema, compare
-every Gold table row by row (order-independent checksum) with the warehouse, check that republishing is
-idempotent and leaves no loading schema, and drop the schema afterwards.
+every Gold table row by row with the warehouse (`EXCEPT ALL` in both directions), check that republishing is
+idempotent and leaves no loading schema, that a dependent BI view blocks the swap and survives, that an unmanaged
+schema is never replaced, and that the reader role can read Gold. They drop their schemas and roles afterwards.
 
 The tests run the whole pipeline in a temporary directory (`DATA_DIR`) and assert Silver invariants:
 every order appears exactly once, no order disappears without a trace, broken events are quarantined with a known reason,
