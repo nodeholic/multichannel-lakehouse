@@ -52,10 +52,12 @@ python -m venv .venv
 .venv/Scripts/python src/data_generator.py --start-date 2026-11-01 --days 7 --orders-per-day 200
 .venv/Scripts/python src/bronze_to_silver.py
 .venv/Scripts/python src/query.py "SELECT channel, sum(net_amount) FROM silver_orders WHERE order_status='COMPLETED' GROUP BY 1"
-.venv/Scripts/dbt build --project-dir dbt --profiles-dir dbt      # models + data tests
+.venv/Scripts/python src/run_dbt.py build                 # dbt models + data tests
 ```
 
-`dbt build` runs every model and its data tests in dependency order. To browse the lineage graph:
+`dbt build` runs every model and its data tests in dependency order. `src/run_dbt.py` passes its arguments to
+dbt and picks the target from `STORAGE` (plain `dbt build --project-dir dbt --profiles-dir dbt` also works for
+local runs). To browse the lineage graph:
 `dbt docs generate --project-dir dbt --profiles-dir dbt && dbt docs serve --project-dir dbt --profiles-dir dbt`.
 
 ## Local infrastructure (Docker)
@@ -104,7 +106,57 @@ affected, because `tests/conftest.py` pins every test run to local storage.
 - Delete-then-write is not atomic: if a run fails halfway, that Silver table is incomplete until the next successful
   run. Bronze is untouched, so a rerun always recovers.
 - The first S3 run downloads DuckDB's `httpfs` extension (network access needed once; it is cached afterwards).
-- dbt still reads the local Silver until Gold moves to Postgres (next PR).
+- `STORAGE=s3 python src/run_dbt.py build` makes dbt read Silver from S3 (target `s3` in `dbt/profiles.yml`,
+  credentials exported from `.env`). The warehouse file stays local under `DATA_DIR`.
+
+### Publishing Gold to Postgres
+
+```bash
+python src/run_dbt.py build                    # Gold in the DuckDB warehouse
+python src/publish_gold_to_postgres.py         # Gold in Postgres, schema `gold`
+```
+
+Query it from the host with any SQL client (DBeaver, pgAdmin, psql) on `127.0.0.1`, **the port from
+`POSTGRES_PORT` in `.env`** (another Postgres on the machine may already own 5432), database `warehouse`,
+credentials from `.env`. For example, revenue per channel:
+
+```bash
+set -a; . ./.env; set +a          # export the POSTGRES_* values from .env into this shell
+PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+  SELECT ch.channel_name, count(DISTINCT f.order_id) AS orders, sum(f.net_amount) AS revenue
+  FROM gold.fact_order_items f JOIN gold.dim_channel ch USING (channel_key)
+  WHERE f.order_status = 'COMPLETED'
+  GROUP BY 1 ORDER BY revenue DESC"
+```
+
+Without a local psql: `docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`.
+
+**How the publish stays safe.**
+
+1. The five Gold tables are loaded into a per-run schema `gold__loading_<id>`.
+2. They are checked against the warehouse (row counts plus gross, discount and net totals). Nothing is swapped if
+   they differ.
+3. They get primary keys, `SELECT` for `POSTGRES_READER_ROLE` (optional), and a "managed by
+   publish_gold_to_postgres" marker.
+4. One Postgres statement swaps them in. Postgres DDL is transactional, so a BI tool reads either the previous Gold
+   or the new one, never a half-loaded mix.
+
+The swap replaces only what the tool owns, and otherwise fails loudly without changing anything:
+
+- **Unmarked schema.** It refuses to replace a schema without the marker, so `POSTGRES_SCHEMA` can never wipe an
+  application schema. System schemas such as `public` are rejected at startup.
+- **No `CASCADE`.** The old Gold tables and schema are dropped with `RESTRICT`, never `CASCADE`. If a BI view
+  depends on Gold, the publish stops and the view survives. Recreate such views after the publish, or build them in
+  dbt instead.
+- **Concurrent publishes.** An advisory lock serializes them, and the swap checks that the loading schema is
+  complete.
+- **Locks.** `lock_timeout` is 10 s, so a long-running query on Gold makes the publish fail rather than queue every
+  reader behind it. Rerun it later.
+- **Grants.** Every publish creates new tables, so grants made by hand on Gold are gone after the next publish.
+  Grant to `POSTGRES_READER_ROLE` (re-applied on every publish) and make users members of that role.
+- **Hard crashes.** Errors and Ctrl-C drop the run's loading schema. A killed process or a machine crash can leave
+  a `gold__loading_<id>` schema behind; Gold itself is unaffected. List leftovers with
+  `SELECT nspname FROM pg_namespace WHERE nspname LIKE 'gold\_\_loading\_%';` and drop them when no publish is running.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -112,9 +164,14 @@ affected, because `tests/conftest.py` pins every test run to local storage.
 | `S3_ENDPOINT` | `http://localhost:${S3_PORT}` | S3 API endpoint, must start with `http://` or `https://` |
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | from `.env` | credentials, required when `STORAGE=s3` |
 | `BRONZE_URI`, `SILVER_URI` | `data/bronze`, `data/silver` (local); `s3://lakehouse-bronze`, `s3://lakehouse-silver` (s3) | override the layer roots; must match `STORAGE` |
+| `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB` | `127.0.0.1`, `5432`, `warehouse` | serving database |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD` | from `.env` | credentials, required to publish |
+| `POSTGRES_SCHEMA` | `gold` | target schema: `[a-z_][a-z0-9_]{0,39}`, not a system schema |
+| `POSTGRES_READER_ROLE` | none | role that gets read access to the published Gold |
 
 Invalid settings (empty URI, `s3://` without a bucket, an endpoint without scheme, missing credentials, an `s3://`
-URI while `STORAGE=local`) stop the job at startup with a message naming the variable.
+URI while `STORAGE=local`, a system or over-long schema name) stop the job at startup with a message naming the
+variable.
 
 ## Answering business questions
 
@@ -167,6 +224,8 @@ Sample results (seed 42, 7 days × 200 orders):
 | `src/data_generator.py` | Simulates multi-channel order events, with injected dirty data (duplicates, missing `order_id`, messy emails, malformed timestamps, unknown statuses, broken items) |
 | `src/bronze_to_silver.py` | Validates and cleans data with DuckDB SQL, writes Parquet partitioned by `order_date`, idempotent |
 | `src/query.py` | Runs ad-hoc SQL against the `bronze_events` and `silver_*` views and the `gold.*` tables |
+| `src/run_dbt.py` | Runs dbt with the pipeline's storage settings (target `local` or `s3`) |
+| `src/publish_gold_to_postgres.py` | Publishes the Gold star schema to Postgres with an atomic schema swap |
 | `dbt/` | dbt project for the Gold layer: Silver sources, staging views, star schema, seeds, data tests |
 | `src/export_dashboard_data.py` | Exports Gold and Silver quarantine numbers as JSON for the dashboard |
 | `dashboard/` | Observable Framework site published on GitHub Pages |
@@ -225,11 +284,15 @@ of the commercial Evidence Studio.
 ```bash
 .venv/Scripts/pip install -r requirements-dev.txt
 .venv/Scripts/python -m pytest -v                                   # offline, S3 tests skipped
-RUN_S3_TESTS=1 .venv/Scripts/python -m pytest tests/test_s3_storage_pipeline.py -v   # needs docker compose up -d
+RUN_INTEGRATION_TESTS=1 .venv/Scripts/python -m pytest -v          # also S3 + Postgres; needs docker compose up -d
 ```
 
-The S3 integration tests write under a unique `pytest-<id>` prefix, compare S3 Silver with local Silver for the
-same seed, check that reruns replace files instead of adding them, and delete their prefix afterwards.
+The integration tests never touch real data. S3 tests write under a unique `pytest-<id>` prefix, compare S3
+Silver and the Gold built from it with the local run for the same seed, check that reruns replace files instead
+of adding them, and delete their prefix afterwards. Postgres tests publish into a `pytest_<id>` schema, compare
+every Gold table row by row with the warehouse (`EXCEPT ALL` in both directions), check that republishing is
+idempotent and leaves no loading schema, that a dependent BI view blocks the swap and survives, that an unmanaged
+schema is never replaced, and that the reader role can read Gold. They drop their schemas and roles afterwards.
 
 The tests run the whole pipeline in a temporary directory (`DATA_DIR`) and assert Silver invariants:
 every order appears exactly once, no order disappears without a trace, broken events are quarantined with a known reason,

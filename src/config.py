@@ -12,6 +12,7 @@ Invalid settings fail here, at startup, with a message naming the variable, inst
 surfacing later as a confusing S3 or file-system error.
 """
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -90,6 +91,28 @@ if _endpoint.scheme not in ("http", "https") or not _endpoint.netloc:
 
 if STORAGE == "s3" and not (S3_ACCESS_KEY and S3_SECRET_KEY):
     raise ConfigError("STORAGE=s3 needs S3_ACCESS_KEY and S3_SECRET_KEY: copy .env.example to .env")
+
+# Postgres serving database (docker-compose.yml). Gold is published to POSTGRES_SCHEMA.
+POSTGRES_HOST = env("POSTGRES_HOST", "127.0.0.1")
+POSTGRES_PORT = int(env("POSTGRES_PORT", "5432"))
+POSTGRES_DB = env("POSTGRES_DB", "warehouse")
+POSTGRES_USER = env("POSTGRES_USER", "")
+POSTGRES_PASSWORD = env("POSTGRES_PASSWORD", "")
+POSTGRES_SCHEMA = env("POSTGRES_SCHEMA", "gold")
+# The name is interpolated into DDL and gets a "__loading_<8 hex>" suffix during a publish.
+# Postgres silently truncates identifiers to 63 bytes, so the base name stays <= 40 characters:
+# otherwise the loading name could be truncated into the live schema name.
+if not re.fullmatch(r"[a-z_][a-z0-9_]{0,39}", POSTGRES_SCHEMA):
+    raise ConfigError(f"POSTGRES_SCHEMA must match [a-z_][a-z0-9_]{{0,39}}, got {POSTGRES_SCHEMA!r}")
+if POSTGRES_SCHEMA in ("public", "information_schema") or POSTGRES_SCHEMA.startswith("pg_"):
+    raise ConfigError(f"POSTGRES_SCHEMA={POSTGRES_SCHEMA} is a system schema; the publish replaces its target")
+# Optional role that gets read access to the published Gold (USAGE on the schema, SELECT on tables).
+POSTGRES_READER_ROLE = env("POSTGRES_READER_ROLE", "")
+if POSTGRES_READER_ROLE and not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", POSTGRES_READER_ROLE):
+    raise ConfigError(f"POSTGRES_READER_ROLE must be a plain lower-case role name, got {POSTGRES_READER_ROLE!r}")
+if POSTGRES_READER_ROLE in ("public", "current_user", "current_role", "session_user"):
+    # GRANT ... TO public would make Gold readable by every role in the database.
+    raise ConfigError(f"POSTGRES_READER_ROLE={POSTGRES_READER_ROLE} is not a dedicated role; create one for BI")
 
 # The salt is mixed into values before hashing. Without it, hashed phone numbers are
 # trivial to reverse: there are only ~10^9 possible numbers, brute-forced in minutes.
