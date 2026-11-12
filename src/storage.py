@@ -49,22 +49,36 @@ def write_text(uri: str, text: str) -> None:
 
 
 def delete_prefix(uri: str) -> int:
-    """Delete everything under uri. Returns the number of objects/files removed."""
+    """Delete everything under uri (one table folder). Returns the number of objects/files removed.
+
+    Refuses to delete a whole bucket or a file-system root, and raises if S3 reports that any
+    key could not be deleted: a half-deleted table must never be silently rewritten on top."""
     if not is_s3(uri):
-        path = Path(uri)
+        path = Path(uri).resolve()
+        if path == Path(path.anchor) or path == Path.home():
+            raise ValueError(f"refusing to delete {path}: not a table folder")
         count = sum(1 for p in path.rglob("*") if p.is_file()) if path.exists() else 0
         shutil.rmtree(path, ignore_errors=True)
         return count
 
     bucket, prefix = split_s3(uri)
-    prefix = prefix.rstrip("/") + "/"  # never match a sibling such as "orders_old/"
+    prefix = prefix.strip("/")
+    if not bucket or not prefix:
+        raise ValueError(f"refusing to delete {uri}: a bucket root is not a table folder")
+    prefix += "/"  # never match a sibling such as "orders_old/"
     client = s3_client()
     removed = 0
     for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
         keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
-        if keys:
-            client.delete_objects(Bucket=bucket, Delete={"Objects": keys, "Quiet": True})
-            removed += len(keys)
+        if not keys:
+            continue
+        # A page holds at most 1000 keys, which is exactly the delete_objects limit.
+        response = client.delete_objects(Bucket=bucket, Delete={"Objects": keys, "Quiet": True})
+        errors = response.get("Errors", [])  # Quiet mode reports failures only
+        if errors:
+            sample = ", ".join(f"{e.get('Key')}: {e.get('Code')}" for e in errors[:3])
+            raise RuntimeError(f"failed to delete {len(errors)} objects under {uri} ({sample})")
+        removed += len(keys)
     return removed
 
 

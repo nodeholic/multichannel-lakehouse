@@ -39,8 +39,10 @@ def main() -> None:
     for name, source in VIEWS.items():
         try:
             con.execute(f"CREATE TEMP VIEW {name} AS SELECT * FROM {source}")
-        except duckdb.Error:
-            pass  # that layer has no data yet -> skip this view
+        except duckdb.IOException as error:
+            if "No files found" not in str(error):
+                raise  # S3 403, stack not running, ... must not look like "no data yet"
+            print(f"skipped view {name}: no files yet", file=sys.stderr)
     con.sql(sys.argv[1]).show(max_rows=50)
 
 
