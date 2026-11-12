@@ -44,3 +44,14 @@ python -m venv .venv
 - **Money is `DECIMAL(12,2)`**, never float.
 - **PII**: normalized first, then hashed as `sha256(salt || value)`; customer names are dropped.
 - **Idempotent**: Silver is fully rebuilt on every run, so reruns never duplicate data.
+
+## Tests
+
+```bash
+.venv/Scripts/pip install -r requirements-dev.txt
+.venv/Scripts/python -m pytest -v
+```
+
+The tests run the whole pipeline in a temporary directory (`DATA_DIR`) and assert Silver invariants:
+every order appears exactly once, broken events are quarantined, no raw PII leaks, money is DECIMAL and adds up,
+and reruns produce identical results. CI (GitHub Actions) runs them on every PR.
