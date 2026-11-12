@@ -20,7 +20,11 @@ bronze_to_silver.py (DuckDB)  ▼
 dbt build                     ▼
                       data/warehouse.duckdb
                         staging.stg_*              thin views over Silver
-                        gold.*                     star schema (coming next)
+                        reference.channels         seed: channel names and platform types
+                        gold.dim_product           one row per product
+                        gold.dim_channel           one row per sales channel
+                        gold.dim_date              one row per calendar day
+                        gold.dim_customer, gold.fact_order_items   (coming next)
 ```
 
 ## Run it
@@ -45,7 +49,7 @@ python -m venv .venv
 | `src/data_generator.py` | Simulates multi-channel order events, with injected dirty data (duplicates, missing `order_id`, messy emails, malformed timestamps, unknown statuses, broken items) |
 | `src/bronze_to_silver.py` | Validates and cleans data with DuckDB SQL, writes Parquet partitioned by `order_date`, idempotent |
 | `src/query.py` | Runs ad-hoc SQL against the `bronze_events` and `silver_*` views |
-| `dbt/` | dbt project for the Gold layer: Silver sources, staging views, data tests |
+| `dbt/` | dbt project for the Gold layer: Silver sources, staging views, dimensions, seeds, data tests |
 
 ## Design decisions
 

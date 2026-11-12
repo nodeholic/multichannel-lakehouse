@@ -19,6 +19,11 @@ flow end-to-end before the next tool is introduced.
 - **Silver keeps two views**: `order_events` (full status history) and `orders`
   (latest state, unique `order_id`). The "order_id is unique" check applies to `orders`, not to events.
 - **Money is DECIMAL(12,2)**, never double/float.
+- **Surrogate keys are md5 hashes of the natural key**, not integer counters. Gold tables are fully
+  rebuilt on every run; a `row_number()` counter would renumber rows whenever a new key sorts in between,
+  silently re-pointing facts. A hash is identical on every run and portable to Postgres.
+  Exception: `dim_date.date_key` is the conventional integer `YYYYMMDD`.
+- **Reference data nobody sends** (channel names, platform types) lives in dbt seeds, versioned in git.
 - **PII** is normalized, then hashed as `sha256(salt || value)`; customer names are dropped.
 - **Every job is idempotent**: reruns never duplicate data.
 - Once Docker is introduced: Airflow gets its own metadata database (not the `warehouse` DB),

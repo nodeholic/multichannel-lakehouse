@@ -6,6 +6,7 @@ version: "1.0.0"
 profile: lakehouse
 
 model-paths: ["models"]
+seed-paths: ["seeds"]
 test-paths: ["tests"]
 macro-paths: ["macros"]
 target-path: "target"
@@ -17,3 +18,12 @@ models:
     staging:
       +materialized: view
       +schema: staging
+    # Marts: the Gold star schema, materialized as tables for fast BI queries.
+    marts:
+      +materialized: table
+      +schema: gold
+
+seeds:
+  lakehouse:
+    # Small reference tables that no source system provides, versioned as CSV in git.
+    +schema: reference

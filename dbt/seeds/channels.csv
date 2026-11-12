@@ -1,0 +1,5 @@
+channel_code,channel_name,platform_type
+SHOPIFY,Shopify,own_webstore
+SHOPEE,Shopee,marketplace
+LAZADA,Lazada,marketplace
+TIKTOK_SHOP,TikTok Shop,social_commerce

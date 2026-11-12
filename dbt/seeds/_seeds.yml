@@ -1,0 +1,21 @@
+version: 2
+
+seeds:
+  - name: channels
+    description: >
+      Reference data for every sales channel. Sources only send a channel code,
+      so the display name and the platform type are maintained here, in git.
+    config:
+      column_types:
+        channel_code: varchar
+        channel_name: varchar
+        platform_type: varchar
+    columns:
+      - name: channel_code
+        data_tests: [not_null, unique]
+      - name: platform_type
+        description: own_webstore (D2C site), marketplace, or social_commerce.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [own_webstore, marketplace, social_commerce]
