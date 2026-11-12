@@ -9,3 +9,9 @@ dbt/logs/
 dbt/dbt_packages/
 dbt/.user.yml
 logs/
+
+# dashboard (Observable Framework): dependencies, build output, cache, generated data
+dashboard/node_modules/
+dashboard/dist/
+dashboard/src/.observablehq/
+dashboard/src/data/*.json

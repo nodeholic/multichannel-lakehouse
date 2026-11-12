@@ -6,6 +6,9 @@ architecture (Bronze → Silver → Gold). 100% open-source, runs locally.
 
 The project is built incrementally, one phase at a time. See [docs/roadmap.md](docs/roadmap.md).
 
+**Live dashboard:** <https://nodeholic.github.io/multichannel-lakehouse/>. It is rebuilt from a fresh pipeline
+run on every merge into `dev`. All data is synthetic.
+
 ## Current state: Phase 2 done, Bronze → Silver → Gold star schema
 
 ```
@@ -165,6 +168,8 @@ Sample results (seed 42, 7 days × 200 orders):
 | `src/bronze_to_silver.py` | Validates and cleans data with DuckDB SQL, writes Parquet partitioned by `order_date`, idempotent |
 | `src/query.py` | Runs ad-hoc SQL against the `bronze_events` and `silver_*` views and the `gold.*` tables |
 | `dbt/` | dbt project for the Gold layer: Silver sources, staging views, star schema, seeds, data tests |
+| `src/export_dashboard_data.py` | Exports Gold and Silver quarantine numbers as JSON for the dashboard |
+| `dashboard/` | Observable Framework site published on GitHub Pages |
 
 ## Design decisions
 
@@ -191,6 +196,29 @@ An event that breaks a rule is quarantined in `silver/rejected_events` with the 
 
 Bronze is read with an explicit all-text schema and Silver converts with `TRY_CAST`, so a single malformed
 row can never crash the job, and inferred types never drift with the data.
+
+## Public dashboard
+
+A static site built with [Observable Framework](https://observablehq.com/framework/) and published on GitHub
+Pages by `.github/workflows/dashboard.yml`. Two pages: **Sales overview** (KPIs, revenue per day and channel,
+products, categories, membership tiers) and **Data quality** (Bronze → Silver funnel, quarantine reasons).
+
+GitHub Pages serves static files only, so CI runs the pipeline on sample data, `src/export_dashboard_data.py`
+writes the numbers as JSON, and Framework turns them into HTML. Nothing on the site is typed by hand.
+
+Build it locally (Node 20+):
+
+```bash
+.venv/Scripts/python src/export_dashboard_data.py   # after the pipeline and dbt build
+cd dashboard
+npm ci
+npm run dev      # live preview at http://127.0.0.1:3000
+npm run build    # static site in dashboard/dist
+```
+
+Set `OBSERVABLE_TELEMETRY_DISABLE=true` to turn off Framework's anonymous usage telemetry (CI does).
+Evidence.dev was the first choice for a BI-as-code site, but its open-source npm workflow is deprecated in favour
+of the commercial Evidence Studio.
 
 ## Tests
 

@@ -1,0 +1,64 @@
+# Builds the public dashboard from a fresh pipeline run and publishes it to GitHub Pages.
+#   pull_request : build only, so a broken dashboard fails the PR
+#   push to dev  : build and deploy to https://nodeholic.github.io/multichannel-lakehouse/
+name: dashboard
+
+on:
+  pull_request:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push cancels an older build in progress.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      OBSERVABLE_TELEMETRY_DISABLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Run the pipeline on sample data (seed 42, 7 days x 200 orders)
+        run: |
+          python src/data_generator.py --start-date 2026-11-01 --days 7 --orders-per-day 200
+          python src/bronze_to_silver.py
+          dbt build --project-dir dbt --profiles-dir dbt
+          python src/export_dashboard_data.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Build the static site
+        working-directory: dashboard
+        run: |
+          npm ci --no-fund --no-audit
+          npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard/dist
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
