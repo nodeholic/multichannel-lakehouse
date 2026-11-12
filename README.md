@@ -6,7 +6,7 @@ architecture (Bronze → Silver → Gold). 100% open-source, runs locally.
 
 The project is built incrementally, one phase at a time. See [docs/roadmap.md](docs/roadmap.md).
 
-## Current state: Phase 2 in progress, Silver → Gold with dbt
+## Current state: Phase 2 done, Bronze → Silver → Gold star schema
 
 ```
 data_generator.py ──► data/bronze/orders/year=/month=/day=/*.jsonl   (raw JSON, append-only)
@@ -25,8 +25,21 @@ dbt build                     ▼
                         gold.dim_channel           one row per sales channel
                         gold.dim_date              one row per calendar day
                         gold.dim_customer          one row per customer version (SCD Type 2)
-                        gold.fact_order_items      (coming next)
+                        gold.fact_order_items      one row per product in an order (the fact)
 ```
+
+### Gold star schema
+
+```
+                    dim_date
+                       │
+   dim_customer ── fact_order_items ── dim_product
+   (SCD Type 2)        │
+                    dim_channel
+```
+
+`fact_order_items` holds quantities, money and keys. Each sale points to the customer **version** that was
+valid when the order was placed, so revenue by membership tier reflects the tier at purchase time.
 
 ## Run it
 
@@ -42,6 +55,48 @@ python -m venv .venv
 `dbt build` runs every model and its data tests in dependency order. To browse the lineage graph:
 `dbt docs generate --project-dir dbt --profiles-dir dbt && dbt docs serve --project-dir dbt --profiles-dir dbt`.
 
+## Answering business questions
+
+`src/query.py` opens the warehouse read-only, so Gold tables can be queried directly. Every question has the
+same shape: numbers from the fact, grouped by a dimension.
+
+```sql
+-- Revenue per channel
+SELECT c.channel_name, count(DISTINCT f.order_id) AS orders, sum(f.net_amount) AS revenue
+FROM gold.fact_order_items f JOIN gold.dim_channel c USING (channel_key)
+WHERE f.order_status = 'COMPLETED'
+GROUP BY ALL ORDER BY revenue DESC;
+
+-- Top 5 products
+SELECT p.product_name, p.category, sum(f.quantity) AS units, sum(f.net_amount) AS revenue
+FROM gold.fact_order_items f JOIN gold.dim_product p USING (product_key)
+WHERE f.order_status = 'COMPLETED'
+GROUP BY ALL ORDER BY revenue DESC LIMIT 5;
+
+-- Refund rate per channel (refunded / delivered orders)
+SELECT c.channel_name,
+       count(DISTINCT f.order_id) FILTER (WHERE f.order_status = 'REFUNDED') AS refunded,
+       count(DISTINCT f.order_id) FILTER (WHERE f.order_status IN ('COMPLETED', 'REFUNDED')) AS delivered,
+       round(100.0 * refunded / delivered, 1) AS refund_rate_pct
+FROM gold.fact_order_items f JOIN gold.dim_channel c USING (channel_key)
+GROUP BY ALL ORDER BY refund_rate_pct DESC;
+
+-- Revenue per membership tier at the time of purchase (uses SCD Type 2)
+SELECT cu.membership_tier, sum(f.net_amount) AS revenue
+FROM gold.fact_order_items f JOIN gold.dim_customer cu USING (customer_key)
+WHERE f.order_status = 'COMPLETED'
+GROUP BY ALL ORDER BY revenue DESC;
+```
+
+Sample results (seed 42, 7 days × 200 orders):
+
+| Channel | Orders | Revenue (VND) | Refund rate |
+|---|---|---|---|
+| Shopify | 302 | 703,583,900 | 7.1% |
+| TikTok Shop | 269 | 703,306,000 | 9.1% |
+| Lazada | 267 | 634,391,100 | 9.5% |
+| Shopee | 256 | 616,067,800 | 9.2% |
+
 ## Files
 
 | File | Purpose |
@@ -49,8 +104,8 @@ python -m venv .venv
 | `src/config.py` | Layer paths and the PII hashing salt (`PII_SALT` env var) |
 | `src/data_generator.py` | Simulates multi-channel order events, with injected dirty data (duplicates, missing `order_id`, messy emails, malformed timestamps, unknown statuses, broken items) |
 | `src/bronze_to_silver.py` | Validates and cleans data with DuckDB SQL, writes Parquet partitioned by `order_date`, idempotent |
-| `src/query.py` | Runs ad-hoc SQL against the `bronze_events` and `silver_*` views |
-| `dbt/` | dbt project for the Gold layer: Silver sources, staging views, dimensions, seeds, data tests |
+| `src/query.py` | Runs ad-hoc SQL against the `bronze_events` and `silver_*` views and the `gold.*` tables |
+| `dbt/` | dbt project for the Gold layer: Silver sources, staging views, star schema, seeds, data tests |
 
 ## Design decisions
 

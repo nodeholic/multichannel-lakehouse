@@ -1,6 +1,57 @@
 version: 2
 
 models:
+  - name: fact_order_items
+    description: >
+      One row per product within an order. Left joins keep every sale; the not_null and
+      relationships tests below prove every key resolved to a dimension row.
+    columns:
+      - name: order_item_key
+        description: Surrogate key, md5 of order_id + product_id.
+        data_tests: [not_null, unique]
+      - name: order_id
+        description: Degenerate dimension (the order number itself).
+        data_tests: [not_null]
+      - name: date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: customer_key
+        description: The customer version valid when the order was placed.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customer')
+                field: customer_key
+      - name: channel_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_channel')
+                field: channel_key
+      - name: product_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_product')
+                field: product_key
+      - name: order_status
+        description: Degenerate dimension. Revenue usually counts COMPLETED only.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [PENDING, PROCESSING, COMPLETED, CANCELLED, REFUNDED]
+      - name: quantity
+        data_tests: [not_null]
+      - name: net_amount
+        data_tests: [not_null]
+
   - name: dim_product
     description: One row per product, latest known attributes (SCD Type 1).
     columns:
