@@ -24,7 +24,8 @@ dbt build                     ▼
                         gold.dim_product           one row per product
                         gold.dim_channel           one row per sales channel
                         gold.dim_date              one row per calendar day
-                        gold.dim_customer, gold.fact_order_items   (coming next)
+                        gold.dim_customer          one row per customer version (SCD Type 2)
+                        gold.fact_order_items      (coming next)
 ```
 
 ## Run it

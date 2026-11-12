@@ -18,6 +18,28 @@ models:
       - name: list_price
         data_tests: [not_null]
 
+  - name: dim_customer
+    description: >
+      One row per version of a customer (SCD Type 2), rebuilt from order history.
+      Validity is half-open [effective_start_date, effective_end_date); the current
+      version has effective_end_date = null.
+    columns:
+      - name: customer_key
+        description: Surrogate key, md5 of customer_id + effective_start_date.
+        data_tests: [not_null, unique]
+      - name: customer_id
+        description: Natural key; repeats once per version.
+        data_tests: [not_null]
+      - name: membership_tier
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [Standard, Silver, Gold, Platinum]
+      - name: effective_start_date
+        data_tests: [not_null]
+      - name: is_current
+        data_tests: [not_null]
+
   - name: dim_channel
     description: One row per sales channel, from the channels seed.
     columns:
