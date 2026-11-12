@@ -52,10 +52,12 @@ python -m venv .venv
 .venv/Scripts/python src/data_generator.py --start-date 2026-11-01 --days 7 --orders-per-day 200
 .venv/Scripts/python src/bronze_to_silver.py
 .venv/Scripts/python src/query.py "SELECT channel, sum(net_amount) FROM silver_orders WHERE order_status='COMPLETED' GROUP BY 1"
-.venv/Scripts/dbt build --project-dir dbt --profiles-dir dbt      # models + data tests
+.venv/Scripts/python src/run_dbt.py build                 # dbt models + data tests
 ```
 
-`dbt build` runs every model and its data tests in dependency order. To browse the lineage graph:
+`dbt build` runs every model and its data tests in dependency order. `src/run_dbt.py` passes its arguments to
+dbt and picks the target from `STORAGE` (plain `dbt build --project-dir dbt --profiles-dir dbt` also works for
+local runs). To browse the lineage graph:
 `dbt docs generate --project-dir dbt --profiles-dir dbt && dbt docs serve --project-dir dbt --profiles-dir dbt`.
 
 ## Local infrastructure (Docker)
@@ -104,7 +106,22 @@ affected, because `tests/conftest.py` pins every test run to local storage.
 - Delete-then-write is not atomic: if a run fails halfway, that Silver table is incomplete until the next successful
   run. Bronze is untouched, so a rerun always recovers.
 - The first S3 run downloads DuckDB's `httpfs` extension (network access needed once; it is cached afterwards).
-- dbt still reads the local Silver until Gold moves to Postgres (next PR).
+- `STORAGE=s3 python src/run_dbt.py build` makes dbt read Silver from S3 (target `s3` in `dbt/profiles.yml`,
+  credentials exported from `.env`). The warehouse file stays local under `DATA_DIR`.
+
+### Publishing Gold to Postgres
+
+```bash
+python src/run_dbt.py build                    # Gold in the DuckDB warehouse
+python src/publish_gold_to_postgres.py         # Gold in Postgres, schema `gold`
+docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select count(*) from gold.fact_order_items"'
+```
+
+The publish is atomic and idempotent: the five Gold tables are loaded into `gold__loading`, checked against the
+warehouse (row counts and money totals; nothing is swapped if they differ), given primary keys, and then swapped
+in with one Postgres statement (`DROP SCHEMA gold` + `ALTER SCHEMA gold__loading RENAME TO gold`). Postgres DDL is
+transactional, so a BI tool reads either the previous Gold or the new one, never a half-loaded mix.
+`POSTGRES_SCHEMA` changes the target schema (tests publish into `pytest_<id>` and drop it).
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -167,6 +184,8 @@ Sample results (seed 42, 7 days × 200 orders):
 | `src/data_generator.py` | Simulates multi-channel order events, with injected dirty data (duplicates, missing `order_id`, messy emails, malformed timestamps, unknown statuses, broken items) |
 | `src/bronze_to_silver.py` | Validates and cleans data with DuckDB SQL, writes Parquet partitioned by `order_date`, idempotent |
 | `src/query.py` | Runs ad-hoc SQL against the `bronze_events` and `silver_*` views and the `gold.*` tables |
+| `src/run_dbt.py` | Runs dbt with the pipeline's storage settings (target `local` or `s3`) |
+| `src/publish_gold_to_postgres.py` | Publishes the Gold star schema to Postgres with an atomic schema swap |
 | `dbt/` | dbt project for the Gold layer: Silver sources, staging views, star schema, seeds, data tests |
 | `src/export_dashboard_data.py` | Exports Gold and Silver quarantine numbers as JSON for the dashboard |
 | `dashboard/` | Observable Framework site published on GitHub Pages |
@@ -225,11 +244,14 @@ of the commercial Evidence Studio.
 ```bash
 .venv/Scripts/pip install -r requirements-dev.txt
 .venv/Scripts/python -m pytest -v                                   # offline, S3 tests skipped
-RUN_S3_TESTS=1 .venv/Scripts/python -m pytest tests/test_s3_storage_pipeline.py -v   # needs docker compose up -d
+RUN_INTEGRATION_TESTS=1 .venv/Scripts/python -m pytest -v          # also S3 + Postgres; needs docker compose up -d
 ```
 
-The S3 integration tests write under a unique `pytest-<id>` prefix, compare S3 Silver with local Silver for the
-same seed, check that reruns replace files instead of adding them, and delete their prefix afterwards.
+The integration tests never touch real data. S3 tests write under a unique `pytest-<id>` prefix, compare S3
+Silver and the Gold built from it with the local run for the same seed, check that reruns replace files instead
+of adding them, and delete their prefix afterwards. Postgres tests publish into a `pytest_<id>` schema, compare
+every Gold table row by row (order-independent checksum) with the warehouse, check that republishing is
+idempotent and leaves no loading schema, and drop the schema afterwards.
 
 The tests run the whole pipeline in a temporary directory (`DATA_DIR`) and assert Silver invariants:
 every order appears exactly once, no order disappears without a trace, broken events are quarantined with a known reason,

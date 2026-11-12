@@ -91,6 +91,17 @@ if _endpoint.scheme not in ("http", "https") or not _endpoint.netloc:
 if STORAGE == "s3" and not (S3_ACCESS_KEY and S3_SECRET_KEY):
     raise ConfigError("STORAGE=s3 needs S3_ACCESS_KEY and S3_SECRET_KEY: copy .env.example to .env")
 
+# Postgres serving database (docker-compose.yml). Gold is published to POSTGRES_SCHEMA.
+POSTGRES_HOST = env("POSTGRES_HOST", "127.0.0.1")
+POSTGRES_PORT = int(env("POSTGRES_PORT", "5432"))
+POSTGRES_DB = env("POSTGRES_DB", "warehouse")
+POSTGRES_USER = env("POSTGRES_USER", "")
+POSTGRES_PASSWORD = env("POSTGRES_PASSWORD", "")
+POSTGRES_SCHEMA = env("POSTGRES_SCHEMA", "gold")
+if not POSTGRES_SCHEMA.isidentifier() or POSTGRES_SCHEMA != POSTGRES_SCHEMA.lower():
+    # The schema name is interpolated into DDL, so only plain lower-case identifiers are allowed.
+    raise ConfigError(f"POSTGRES_SCHEMA must be a lower-case identifier, got {POSTGRES_SCHEMA!r}")
+
 # The salt is mixed into values before hashing. Without it, hashed phone numbers are
 # trivial to reverse: there are only ~10^9 possible numbers, brute-forced in minutes.
 PII_SALT = env("PII_SALT", "dev-only-salt-change-me")

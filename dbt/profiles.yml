@@ -1,9 +1,25 @@
-# Connection profile. The warehouse is a single DuckDB file next to the Silver data.
-# DATA_DIR defaults to ./data (relative to where dbt is run, i.e. the repository root).
+# Connection profile. The warehouse is a single DuckDB file under DATA_DIR, whatever the storage.
+#   local (default) : Silver sources are Parquet files on disk
+#   s3              : Silver sources are read from RustFS through httpfs and an S3 secret
+# src/run_dbt.py picks the target from STORAGE and exports the variables below from .env,
+# so plain `dbt build --project-dir dbt --profiles-dir dbt` keeps working for local runs.
 lakehouse:
-  target: dev
+  target: local
   outputs:
-    dev:
+    local:
       type: duckdb
       path: "{{ env_var('DATA_DIR', 'data') }}/warehouse.duckdb"
       threads: 4
+    s3:
+      type: duckdb
+      path: "{{ env_var('DATA_DIR', 'data') }}/warehouse.duckdb"
+      threads: 4
+      extensions: [httpfs]
+      secrets:
+        - type: s3
+          key_id: "{{ env_var('S3_ACCESS_KEY') }}"
+          secret: "{{ env_var('S3_SECRET_KEY') }}"
+          region: "{{ env_var('S3_REGION', 'us-east-1') }}"
+          endpoint: "{{ env_var('S3_ENDPOINT_HOST') }}"
+          url_style: path
+          use_ssl: "{{ env_var('S3_USE_SSL', 'false') }}"

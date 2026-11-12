@@ -1,42 +1,24 @@
-"""Integration test: the pipeline on S3 (RustFS) produces the same Silver as on local disk.
+"""Integration test: the pipeline on S3 (RustFS) produces the same Silver and Gold as on local disk.
 
-Needs the docker compose stack and opts in explicitly, so the default test run stays offline:
-    docker compose up -d
-    RUN_S3_TESTS=1 pytest tests/test_s3_storage_pipeline.py -v
-
-Every run writes under a unique prefix (s3://lakehouse-bronze/pytest-<id>/...) and deletes it
-afterwards, so the real Bronze and Silver data in the buckets are never touched.
+Needs the docker compose stack (see integration_helpers). Every run writes under a unique prefix
+(s3://lakehouse-bronze/pytest-<id>/...) and deletes it afterwards, so the real Bronze and Silver
+data in the buckets are never touched.
 """
-import os
-import subprocess
 import sys
 import uuid
-from pathlib import Path
 
+import duckdb
 import pytest
 
-SRC = Path(__file__).resolve().parent.parent / "src"
+from integration_helpers import SRC, requires_stack, run_script
+
 sys.path.insert(0, str(SRC))
 import storage  # noqa: E402
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_S3_TESTS") != "1",
-    reason="set RUN_S3_TESTS=1 and run `docker compose up -d` to test against RustFS",
-)
+pytestmark = requires_stack
 
 DAYS, ORDERS_PER_DAY = 2, 50
 TABLES = ("order_events", "orders", "order_items", "rejected_events")
-
-
-def run_script(script: str, env: dict, *args: str) -> None:
-    result = subprocess.run(
-        [sys.executable, str(SRC / script), *args],
-        env={**os.environ, "PYTHONIOENCODING": "utf-8", **env},
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:  # show why the script failed, not just CalledProcessError
-        raise AssertionError(f"{script} exited {result.returncode}:\n{result.stderr[-2000:]}")
 
 
 def run_pipeline(env: dict) -> None:
@@ -90,8 +72,26 @@ def results(s3_env, tmp_path_factory):
         "local": summary(con, (local_dir / "silver").as_posix()),
         "s3": summary(con, s3_env["SILVER_URI"]),
         "con": con,
+        "local_dir": local_dir,
     }
     con.close()
+
+
+def gold_fingerprint(warehouse) -> tuple:
+    """Row counts of the star schema plus the fact's money total."""
+    with duckdb.connect(str(warehouse), read_only=True) as con:
+        return con.execute("""
+            SELECT (SELECT count(*) FROM gold.fact_order_items), (SELECT sum(net_amount) FROM gold.fact_order_items),
+                   (SELECT count(*) FROM gold.dim_customer), (SELECT count(*) FROM gold.dim_product)
+        """).fetchone()
+
+
+def test_dbt_on_s3_silver_matches_dbt_on_local_silver(s3_env, results, tmp_path):
+    run_script("run_dbt.py", {"STORAGE": "local", "DATA_DIR": str(results["local_dir"])}, "build")
+    run_script("run_dbt.py", {**s3_env, "DATA_DIR": str(tmp_path)}, "build")
+    local, on_s3 = gold_fingerprint(results["local_dir"] / "warehouse.duckdb"), gold_fingerprint(tmp_path / "warehouse.duckdb")
+    assert on_s3 == local
+    assert on_s3[0] > 0
 
 
 def test_s3_silver_matches_local_silver(results):
