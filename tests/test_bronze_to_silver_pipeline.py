@@ -3,6 +3,7 @@
 Each test asserts one INVARIANT that the Silver layer must always satisfy,
 no matter how dirty the source data is. This is the precursor of the data quality gate (Soda).
 """
+import json
 import os
 import subprocess
 import sys
@@ -12,6 +13,9 @@ import duckdb
 import pytest
 
 SRC = Path(__file__).resolve().parent.parent / "src"
+sys.path.insert(0, str(SRC))
+from bronze_to_silver import REJECT_REASONS  # noqa: E402
+
 DAYS, ORDERS_PER_DAY = 3, 50
 
 
@@ -38,14 +42,35 @@ def data_dir(tmp_path_factory) -> Path:
     return path
 
 
-def test_every_generated_order_reaches_silver_exactly_once(data_dir):
+def bronze(data_dir: Path) -> str:
+    """DuckDB expression that reads every Bronze event as raw JSON objects."""
+    return f"read_json_objects('{(data_dir / 'bronze' / 'orders' / '**' / '*.jsonl').as_posix()}')"
+
+
+def test_orders_are_unique(data_dir):
     orders = silver(data_dir, "orders")
-    assert scalar(f"SELECT count(*) FROM {orders}") == DAYS * ORDERS_PER_DAY
+    assert scalar(f"SELECT count(*) FROM {orders}") > 0
     assert scalar(f"SELECT count(*) - count(DISTINCT order_id) FROM {orders}") == 0
 
 
-def test_events_missing_order_id_are_quarantined_not_dropped(data_dir):
-    assert scalar(f"SELECT count(*) FROM {silver(data_dir, 'rejected_events')}") > 0
+def test_no_order_disappears_silently(data_dir):
+    # Every order_id seen in Bronze must end up in Silver orders, or in quarantine.
+    assert scalar(
+        f"""SELECT count(*) FROM (
+                SELECT DISTINCT json ->> 'order_id' AS order_id FROM {bronze(data_dir)}
+                WHERE json ->> 'order_id' IS NOT NULL
+            ) b
+            WHERE order_id NOT IN (SELECT order_id FROM {silver(data_dir, 'orders')})
+              AND order_id NOT IN (SELECT order_id FROM {silver(data_dir, 'rejected_events')}
+                                   WHERE order_id IS NOT NULL)"""
+    ) == 0
+
+
+def test_every_rejected_event_has_a_known_reason(data_dir):
+    rejected = silver(data_dir, "rejected_events")
+    assert scalar(f"SELECT count(*) FROM {rejected}") > 0
+    reasons = {r[0] for r in duckdb.execute(f"SELECT DISTINCT reject_reason FROM {rejected}").fetchall()}
+    assert reasons <= set(REJECT_REASONS)
     assert scalar(f"SELECT count(*) FROM {silver(data_dir, 'order_events')} WHERE order_id IS NULL") == 0
 
 
@@ -92,3 +117,61 @@ def test_rerun_is_idempotent(data_dir):
     before = snapshot()
     run_script("bronze_to_silver.py", data_dir)
     assert snapshot() == before
+
+
+# --- One handcrafted event per validation rule -------------------------------------
+
+def make_event(event_id: str, **overrides) -> dict:
+    """A valid event; overrides break exactly one rule."""
+    event = {
+        "event_id": event_id,
+        "order_id": f"ORD-{event_id}",
+        "channel": "SHOPEE",
+        "order_status": "COMPLETED",
+        "created_at": "2026-11-01T10:00:00",
+        "updated_at": "2026-11-01T12:00:00",
+        "customer": {"customer_id": "C00001", "name": "Test User", "email": "test@example.com",
+                     "phone": "0900000000", "city": "Hanoi", "membership_tier": "Standard"},
+        "items": [{"product_id": "P001", "product_name": "Bluetooth Headphones", "category": "Electronics",
+                   "quantity": 1, "unit_price": 590000, "discount_amount": 0}],
+        "currency": "VND",
+    }
+    event.update(overrides)
+    return event
+
+
+ITEM = make_event("x")["items"][0]
+CASES = {
+    "no-order": ({"order_id": None}, "missing_order_id"),
+    "no-customer": ({"customer": dict(make_event("x")["customer"], customer_id=None)}, "missing_customer_id"),
+    "bad-ts": ({"created_at": "2026-13-45T99:99:99"}, "invalid_timestamp"),
+    "bad-status": ({"order_status": "SHIPPED"}, "unknown_status"),
+    "bad-channel": ({"channel": "EBAY"}, "unknown_channel"),
+    "no-items": ({"items": []}, "empty_items"),
+    "neg-qty": ({"items": [dict(ITEM, quantity=-1)]}, "invalid_item"),
+    "text-qty": ({"items": [dict(ITEM, quantity="two")]}, "invalid_item"),
+    "big-discount": ({"items": [dict(ITEM, discount_amount=999999999)]}, "invalid_item"),
+}
+
+
+@pytest.fixture(scope="module")
+def handcrafted_dir(tmp_path_factory) -> Path:
+    path = tmp_path_factory.mktemp("handcrafted")
+    folder = path / "bronze" / "orders" / "year=2026" / "month=11" / "day=01"
+    folder.mkdir(parents=True)
+    events = [make_event("ok")] + [make_event(eid, **overrides) for eid, (overrides, _) in CASES.items()]
+    (folder / "events-test.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    run_script("bronze_to_silver.py", path)  # must not crash on the malformed timestamp
+    return path
+
+
+def test_each_rule_quarantines_its_case(handcrafted_dir):
+    rejected = dict(duckdb.execute(
+        f"SELECT event_id, reject_reason FROM {silver(handcrafted_dir, 'rejected_events')}"
+    ).fetchall())
+    assert rejected == {eid: reason for eid, (_, reason) in CASES.items()}
+
+
+def test_valid_event_survives_next_to_broken_ones(handcrafted_dir):
+    orders = [r[0] for r in duckdb.execute(f"SELECT order_id FROM {silver(handcrafted_dir, 'orders')}").fetchall()]
+    assert orders == ["ORD-ok"]
