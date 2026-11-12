@@ -9,7 +9,7 @@ The project is built incrementally, one phase at a time. See [docs/roadmap.md](d
 **Live dashboard:** <https://nodeholic.github.io/multichannel-lakehouse/>. It is rebuilt from a fresh pipeline
 run on every merge into `dev`. All data is synthetic.
 
-## Current state: Phase 2 done, Bronze → Silver → Gold star schema
+## Current state: Phase 3 done, S3 storage and Gold served from Postgres
 
 ```
 data_generator.py ──► data/bronze/orders/year=/month=/day=/*.jsonl   (raw JSON, append-only)
@@ -226,6 +226,7 @@ Sample results (seed 42, 7 days × 200 orders):
 | `src/query.py` | Runs ad-hoc SQL against the `bronze_events` and `silver_*` views and the `gold.*` tables |
 | `src/run_dbt.py` | Runs dbt with the pipeline's storage settings (target `local` or `s3`) |
 | `src/publish_gold_to_postgres.py` | Publishes the Gold star schema to Postgres with an atomic schema swap |
+| `src/check_published_gold.py` | Fails unless every Gold table exists in Postgres and is not empty |
 | `dbt/` | dbt project for the Gold layer: Silver sources, staging views, star schema, seeds, data tests |
 | `src/export_dashboard_data.py` | Exports Gold and Silver quarantine numbers as JSON for the dashboard |
 | `dashboard/` | Observable Framework site published on GitHub Pages |
@@ -297,4 +298,11 @@ schema is never replaced, and that the reader role can read Gold. They drop thei
 The tests run the whole pipeline in a temporary directory (`DATA_DIR`) and assert Silver invariants:
 every order appears exactly once, no order disappears without a trace, broken events are quarantined with a known reason,
 no raw PII leaks, money is DECIMAL and adds up, and reruns produce identical results. Handcrafted events cover every
-validation rule. CI (GitHub Actions) runs the tests on every PR.
+validation rule.
+
+CI (GitHub Actions, `.github/workflows/pipeline-tests.yml`) runs two jobs on every PR:
+
+- **test**: the fast offline path, with local storage and no Docker.
+- **integration**: the real path. It starts the same `docker-compose.yml` stack, runs every test including the S3
+  and Postgres integration tests, runs the full pipeline with `STORAGE=s3` up to the Postgres publish, and fails
+  unless every Gold table is published and not empty (`src/check_published_gold.py`).
