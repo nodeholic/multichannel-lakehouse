@@ -7,7 +7,7 @@ flow end-to-end before the next tool is introduced.
 |---|---|---|---|
 | 1 | Generator → Bronze → Silver (local) | Python, Faker, DuckDB | ✅ Done |
 | 2 | Gold star schema, SCD2 `dim_customer`, data tests | dbt-duckdb | ✅ Done |
-| 3 | Move storage to MinIO, serve from Postgres | Docker Compose | ⏳ Todo |
+| 3 | Move storage to S3 (RustFS), serve from Postgres | Docker Compose | 🚧 In progress |
 | 4 | Orchestration + data quality gate | Airflow, Soda Core | ⏳ Todo |
 | 5 | Streaming ingestion | Redpanda (+ optional Spark) | ⏳ Todo |
 | 6 | Dashboard, architecture diagram, trade-offs | Superset | ⏳ Todo |
@@ -31,8 +31,11 @@ flow end-to-end before the next tool is introduced.
 - **Reference data nobody sends** (channel names, platform types) lives in dbt seeds, versioned in git.
 - **PII** is normalized, then hashed as `sha256(salt || value)`; customer names are dropped.
 - **Every job is idempotent**: reruns never duplicate data.
-- Once Docker is introduced: Airflow gets its own metadata database (not the `warehouse` DB),
-  and every image is pinned to an exact version.
+- **RustFS replaces MinIO** as the S3-compatible object store: as of November 2026, `minio/minio` is no longer
+  published on Docker Hub and the quay.io repository requires authentication. RustFS is Apache 2.0, speaks the
+  S3 API and offers a MinIO-like console, so the pipeline code only depends on S3, not on the vendor.
+- **Every Docker image is pinned to an exact version**, and credentials and host ports come from a git-ignored `.env`.
+- When Airflow arrives (phase 4), it gets its own metadata database, not the `warehouse` DB.
 
 ## Definition of done for each phase
 
