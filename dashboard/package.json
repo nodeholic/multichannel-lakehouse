@@ -1,0 +1,16 @@
+{
+  "name": "multichannel-lakehouse-dashboard",
+  "private": true,
+  "type": "module",
+  "description": "Static dashboard of the Gold layer, built with Observable Framework.",
+  "scripts": {
+    "dev": "observable preview",
+    "build": "observable build"
+  },
+  "dependencies": {
+    "@observablehq/framework": "1.13.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
