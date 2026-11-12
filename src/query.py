@@ -8,22 +8,24 @@ Gold tables (after `dbt build`): gold.fact_order_items, gold.dim_customer,
 Examples:
   python src/query.py "SELECT channel, count(*), sum(net_amount) FROM silver_orders GROUP BY 1"
   python src/query.py "SELECT * FROM gold.dim_customer WHERE customer_id = 'C00002'"
+  STORAGE=s3 python src/query.py "SELECT count(*) FROM bronze_events"   # read from RustFS
 """
 import sys
 
 import duckdb
 
-from config import BRONZE_ORDERS_DIR, DATA_DIR, SILVER_DIR
+from config import BRONZE_ORDERS_URI, DATA_DIR, SILVER_URI
+from storage import connect_duckdb
 
 WAREHOUSE = DATA_DIR / "warehouse.duckdb"
 
 VIEWS = {
-    "bronze_events": f"read_json('{(BRONZE_ORDERS_DIR / '**' / '*.jsonl').as_posix()}', "
+    "bronze_events": f"read_json('{BRONZE_ORDERS_URI}/**/*.jsonl', "
     "format='newline_delimited', hive_partitioning=true)",
-    "silver_orders": f"read_parquet('{(SILVER_DIR / 'orders' / '**' / '*.parquet').as_posix()}', hive_partitioning=true)",
-    "silver_order_items": f"read_parquet('{(SILVER_DIR / 'order_items' / '**' / '*.parquet').as_posix()}', hive_partitioning=true)",
-    "silver_order_events": f"read_parquet('{(SILVER_DIR / 'order_events' / '**' / '*.parquet').as_posix()}', hive_partitioning=true)",
-    "silver_rejected": f"read_parquet('{(SILVER_DIR / 'rejected_events' / '*.parquet').as_posix()}')",
+    "silver_orders": f"read_parquet('{SILVER_URI}/orders/**/*.parquet', hive_partitioning=true)",
+    "silver_order_items": f"read_parquet('{SILVER_URI}/order_items/**/*.parquet', hive_partitioning=true)",
+    "silver_order_events": f"read_parquet('{SILVER_URI}/order_events/**/*.parquet', hive_partitioning=true)",
+    "silver_rejected": f"read_parquet('{SILVER_URI}/rejected_events/*.parquet')",
 }
 
 
@@ -33,7 +35,7 @@ def main() -> None:
         sys.exit(1)
     # Open the dbt warehouse read-only when it exists, so Gold tables are queryable
     # without ever risking a write. Silver views are temporary and live in memory.
-    con = duckdb.connect(str(WAREHOUSE), read_only=True) if WAREHOUSE.exists() else duckdb.connect()
+    con = connect_duckdb(str(WAREHOUSE), read_only=True) if WAREHOUSE.exists() else connect_duckdb()
     for name, source in VIEWS.items():
         try:
             con.execute(f"CREATE TEMP VIEW {name} AS SELECT * FROM {source}")

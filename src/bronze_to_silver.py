@@ -8,21 +8,22 @@ Steps (one SQL statement each, read top to bottom):
   4. latest_orders    : the LATEST state of each order -> one row per order
   5. order_items      : explode the items array -> one row per product in an order
 
-Outputs (fully rebuilt on every run -> rerunning gives identical results = idempotent):
-  data/silver/order_events/     status history (used for customer SCD2 later)
-  data/silver/orders/           partitioned by order_date
-  data/silver/order_items/      partitioned by order_date
-  data/silver/rejected_events/  every quarantined event with its reject_reason
+Outputs under SILVER_URI (data/silver locally, s3://lakehouse-silver with STORAGE=s3),
+fully rebuilt on every run -> rerunning gives identical results = idempotent:
+  order_events/     status history (used for customer SCD2)
+  orders/           partitioned by order_date
+  order_items/      partitioned by order_date
+  rejected_events/  every quarantined event with its reject_reason
 
-Run:  python src/bronze_to_silver.py
+Run:  python src/bronze_to_silver.py              (local)
+      STORAGE=s3 python src/bronze_to_silver.py   (RustFS, after `docker compose up -d`)
 """
-import shutil
-
 import duckdb
 
-from config import BRONZE_ORDERS_DIR, PII_SALT, SILVER_DIR
+from config import BRONZE_ORDERS_URI, PII_SALT, SILVER_URI
+from storage import connect_duckdb, delete_prefix, prepare_target
 
-BRONZE_GLOB = (BRONZE_ORDERS_DIR / "**" / "*.jsonl").as_posix()
+BRONZE_GLOB = f"{BRONZE_ORDERS_URI}/**/*.jsonl"
 
 VALID_CHANNELS = ("SHOPIFY", "SHOPEE", "TIKTOK_SHOP", "LAZADA")
 VALID_STATUSES = ("PENDING", "PROCESSING", "COMPLETED", "CANCELLED", "REFUNDED")
@@ -201,17 +202,16 @@ GROUP BY ALL
 
 
 def write_parquet(con: duckdb.DuckDBPyConnection, table: str, partition_by: str | None) -> None:
-    """Delete the old folder, then rewrite it -> idempotent (reruns never duplicate data)."""
-    target = SILVER_DIR / table
-    shutil.rmtree(target, ignore_errors=True)
-    SILVER_DIR.mkdir(parents=True, exist_ok=True)
+    """Delete the old table folder, then rewrite it -> idempotent (reruns never duplicate data).
+    Works on local disk and on S3: DuckDB cannot delete remote files, so storage.delete_prefix does."""
+    target = f"{SILVER_URI}/{table}"
+    delete_prefix(target)
     if partition_by:
-        con.execute(
-            f"COPY {table} TO '{target.as_posix()}' (FORMAT parquet, PARTITION_BY ({partition_by}))"
-        )
+        prepare_target(target)
+        con.execute(f"COPY {table} TO '{target}' (FORMAT parquet, PARTITION_BY ({partition_by}))")
     else:
-        target.mkdir(parents=True, exist_ok=True)
-        con.execute(f"COPY {table} TO '{(target / 'data.parquet').as_posix()}' (FORMAT parquet)")
+        prepare_target(f"{target}/data.parquet")
+        con.execute(f"COPY {table} TO '{target}/data.parquet' (FORMAT parquet)")
 
 
 def count(con: duckdb.DuckDBPyConnection, table: str) -> int:
@@ -219,7 +219,8 @@ def count(con: duckdb.DuckDBPyConnection, table: str) -> int:
 
 
 def main() -> None:
-    con = duckdb.connect()  # in-memory DB: DuckDB is just the SQL engine, the data lives in files
+    # In-memory DB: DuckDB is just the SQL engine, the data lives in files (local or S3).
+    con = connect_duckdb()
     con.execute("SET VARIABLE pii_salt = ?", [PII_SALT])
 
     for sql in (SQL_RAW, SQL_VALIDATED, SQL_REJECTED, SQL_ORDER_EVENTS, SQL_LATEST, SQL_ORDER_ITEMS, SQL_ORDERS):
@@ -241,7 +242,7 @@ def main() -> None:
     print(f"  order_events    : {events:>6}")
     print(f"  orders          : {count(con, 'orders'):>6}  (one row per order, latest state)")
     print(f"  order_items     : {count(con, 'order_items'):>6}  (one row per product in an order)")
-    print(f"Written to: {SILVER_DIR}")
+    print(f"Written to: {SILVER_URI}")
 
 
 if __name__ == "__main__":
