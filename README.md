@@ -62,7 +62,7 @@ Phase 3 moves storage to an S3-compatible object store and serves Gold from Post
 ```bash
 cp .env.example .env        # once; change the passwords
 docker compose up -d        # RustFS + Postgres, buckets created automatically
-docker compose ps           # rustfs and postgres: healthy, create-buckets: exited (0)
+docker compose ps -a        # rustfs and postgres: healthy, create-buckets: exited (0)
 ```
 
 | Service | Image | Host port (default) | Purpose |
@@ -72,8 +72,10 @@ docker compose ps           # rustfs and postgres: healthy, create-buckets: exit
 | `postgres` | `postgres:17.10-alpine` | `5432` | Serving database for the Gold star schema |
 
 - RustFS console: <http://localhost:9001>, log in with `S3_ACCESS_KEY` / `S3_SECRET_KEY` from `.env`.
-- Postgres: `docker compose exec postgres psql -U lakehouse -d warehouse`.
+- Postgres: `docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'` (uses the values from `.env`).
 - Port already taken (for example another Postgres on 5432)? Change `POSTGRES_PORT`, `S3_PORT` or `S3_CONSOLE_PORT` in `.env`.
+- Ports listen on `127.0.0.1` only. To reach the stack from another machine, remove the `127.0.0.1:` prefix in
+  `docker-compose.yml` and set strong passwords first: the ones in `.env.example` are public.
 - `docker compose down` stops the stack and keeps the data; `docker compose down -v` also deletes the volumes.
 
 RustFS replaces MinIO, the object store in the original design: MinIO images are no longer published on Docker Hub.

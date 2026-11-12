@@ -31,9 +31,9 @@ flow end-to-end before the next tool is introduced.
 - **Reference data nobody sends** (channel names, platform types) lives in dbt seeds, versioned in git.
 - **PII** is normalized, then hashed as `sha256(salt || value)`; customer names are dropped.
 - **Every job is idempotent**: reruns never duplicate data.
-- **RustFS replaces MinIO** as the S3-compatible object store: as of November 2026, `minio/minio` is no longer
-  published on Docker Hub and the quay.io repository requires authentication. RustFS is Apache 2.0, speaks the
-  S3 API and offers a MinIO-like console, so the pipeline code only depends on S3, not on the vendor.
+- **RustFS replaces MinIO** as the S3-compatible object store: MinIO stopped publishing community images
+  (`minio/minio` returned 404 on Docker Hub when Phase 3 started, November 2026). RustFS is Apache 2.0, speaks
+  the S3 API and offers a MinIO-like console, so the pipeline code only depends on S3, not on the vendor.
 - **Every Docker image is pinned to an exact version**, and credentials and host ports come from a git-ignored `.env`.
 - When Airflow arrives (phase 4), it gets its own metadata database, not the `warehouse` DB.
 
