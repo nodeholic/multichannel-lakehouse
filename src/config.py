@@ -7,7 +7,8 @@ import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
+# The data directory can be overridden via an env var (tests use a temp directory).
+DATA_DIR = Path(os.environ.get("DATA_DIR", PROJECT_ROOT / "data"))
 
 BRONZE_ORDERS_DIR = DATA_DIR / "bronze" / "orders"
 SILVER_DIR = DATA_DIR / "silver"
