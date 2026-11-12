@@ -55,6 +55,32 @@ python -m venv .venv
 `dbt build` runs every model and its data tests in dependency order. To browse the lineage graph:
 `dbt docs generate --project-dir dbt --profiles-dir dbt && dbt docs serve --project-dir dbt --profiles-dir dbt`.
 
+## Local infrastructure (Docker)
+
+Phase 3 moves storage to an S3-compatible object store and serves Gold from Postgres. The stack starts with one command:
+
+```bash
+cp .env.example .env        # once; change the passwords
+docker compose up -d        # RustFS + Postgres, buckets created automatically
+docker compose ps -a        # rustfs and postgres: healthy, create-buckets: exited (0)
+```
+
+| Service | Image | Host port (default) | Purpose |
+|---|---|---|---|
+| `rustfs` | `rustfs/rustfs:1.0.4` | `9000` S3 API, `9001` console | Object store for Bronze and Silver (buckets `lakehouse-bronze`, `lakehouse-silver`) |
+| `create-buckets` | `amazon/aws-cli:2.38.6` | – | One-shot job that creates the buckets, safe to rerun |
+| `postgres` | `postgres:17.10-alpine` | `5432` | Serving database for the Gold star schema |
+
+- RustFS console: <http://localhost:9001>, log in with `S3_ACCESS_KEY` / `S3_SECRET_KEY` from `.env`.
+- Postgres: `docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'` (uses the values from `.env`).
+- Port already taken (for example another Postgres on 5432)? Change `POSTGRES_PORT`, `S3_PORT` or `S3_CONSOLE_PORT` in `.env`.
+- Ports listen on `127.0.0.1` only. To reach the stack from another machine, remove the `127.0.0.1:` prefix in
+  `docker-compose.yml` and set strong passwords first: the ones in `.env.example` are public.
+- `docker compose down` stops the stack and keeps the data; `docker compose down -v` also deletes the volumes.
+
+RustFS replaces MinIO, the object store in the original design: MinIO images are no longer published on Docker Hub.
+The pipeline does not use the stack yet; wiring Bronze, Silver and Gold to it follows in the next PRs.
+
 ## Answering business questions
 
 `src/query.py` opens the warehouse read-only, so Gold tables can be queried directly. Every question has the

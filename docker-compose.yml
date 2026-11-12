@@ -1,0 +1,87 @@
+# Local infrastructure for the lakehouse. Start everything with:
+#   cp .env.example .env      # once; then change the passwords
+#   docker compose up -d
+#
+# RustFS replaces MinIO as the S3-compatible object store: MinIO stopped publishing
+# community images. Every image is pinned to an exact version so the stack behaves
+# the same on every machine and in CI.
+#
+# Ports are published on 127.0.0.1 only: this is a local development stack, and
+# .env.example ships well-known placeholder passwords. To reach it from another
+# machine, remove the "127.0.0.1:" prefix AND set strong passwords in .env.
+#
+# No container_name: the project name gives stable names (lakehouse-rustfs-1, ...)
+# and still allows a second copy of the stack with `docker compose -p <name>`.
+name: lakehouse
+
+services:
+  # S3-compatible object store for the Bronze and Silver layers.
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+    ports:
+      - "127.0.0.1:${S3_PORT:-9000}:9000"             # S3 API
+      - "127.0.0.1:${S3_CONSOLE_PORT:-9001}:9001"     # web console
+    volumes:
+      - rustfs_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # One-shot job: creates the buckets once RustFS is healthy, then exits.
+  # Safe to rerun: an existing bucket is left untouched.
+  create-buckets:
+    image: amazon/aws-cli:2.38.6
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for bucket in lakehouse-bronze lakehouse-silver; do
+          if aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket "$$bucket" 2>/dev/null; then
+            echo "bucket $$bucket already exists"
+          else
+            aws --endpoint-url http://rustfs:9000 s3 mb "s3://$$bucket"
+          fi
+        done
+    restart: "no"
+
+  # Serving database: BI tools read the Gold star schema from here.
+  postgres:
+    image: postgres:17.10-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-warehouse}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 checks over TCP. Without it, pg_isready uses the unix socket and can
+      # succeed against the temporary server the image runs during first-boot init, which
+      # does not accept TCP connections yet.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  rustfs_data:
+  postgres_data:
